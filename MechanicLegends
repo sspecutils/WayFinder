@@ -4,7 +4,7 @@ local Window = Rayfield:CreateWindow({
   icon = 138009255210416, showName = "Wayfinder", showIcon = 138009255210416,
   configuration = {autoSave = true, autoLoad = true, fileName = "WayFinder"}
 })
-local WAYFINDER_RAW_URL = "https://pastebin.com/raw/15CNye3W"
+local WAYFINDER_RAW_URL = "https://raw.githubusercontent.com/sspecutils/WayFinder/refs/heads/main/MechanicLegends"
 local Session = (getgenv and getgenv()) or _G
 local Resume = Session.__WayfinderHopResume
 Session.__WayfinderHopResume = nil
