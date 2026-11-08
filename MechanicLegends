@@ -1,0 +1,1606 @@
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+local Window = Rayfield:CreateWindow({
+  name = "Wayfinder", subtitle = "Always Forward.",
+  icon = 138009255210416, showName = "Wayfinder", showIcon = 138009255210416,
+  configuration = {autoSave = true, autoLoad = true, fileName = "WayFinder"}
+})
+local WAYFINDER_RAW_URL = "https://pastebin.com/raw/15CNye3W"
+local Session = (getgenv and getgenv()) or _G
+local Resume = Session.__WayfinderHopResume
+Session.__WayfinderHopResume = nil
+local JunkyardEnabled = Resume ~= nil and Resume.enabled == true
+local AutoHopEnabled = JunkyardEnabled
+local MinimumValue = Resume and Resume.minimum or 50000
+local StartJunkyard, StartAutoHop
+local CustomerJobsToggle, JunkyardToggle, AutoHopToggle
+local JunkyardBusy = false
+local SnipeSucceeded, SnipeUncertain = false, false
+local VisitedServers = Resume and Resume.visited or {}
+local enabled, running = false, false
+local AutoLoop
+local SetProgress
+local currentStep = 0
+local AutoFarmTab = Window:CreateTab({name = "AutoFarm"})
+AutoFarmTab:CreateSection({ name = "Automation", icon = 116544501716299 })
+CustomerJobsToggle = AutoFarmTab:CreateToggle({
+  name = "Customer Jobs", flag = "AutoCustomerJobs", default = false,
+  callback = function(On)
+    enabled = On == true
+    if enabled and AutoHopEnabled then
+      AutoHopEnabled = false
+      if AutoHopToggle then AutoHopToggle:Set(false) end
+    end
+    if not enabled and not running and SetProgress then
+      SetProgress(0, "Paused")
+    elseif not enabled and SetProgress then
+      SetProgress(currentStep, "Stopping after current job...")
+    end
+    if enabled and not running and AutoLoop then
+      running = true
+      task.spawn(function()
+        pcall(AutoLoop)
+        running = false
+      end)
+    end
+  end
+})
+local Progress = AutoFarmTab:CreateProgress({
+  name = "Job Progress", steps = 6, value = 0, text = "Idle",
+  description = "Must be in the workshop to enable."
+})
+SetProgress = function(Step, Status)
+  currentStep = math.clamp(Step, 0, 6)
+  Progress:Set(currentStep)
+  Progress:SetText(Status)
+end
+JunkyardToggle = AutoFarmTab:CreateToggle({
+  name = "Junkyard Car Sniper",
+  flag = "JunkyardCarSniper", default = JunkyardEnabled,
+  callback = function(Value)
+    JunkyardEnabled = Value == true
+    if JunkyardEnabled then
+      if AutoHopEnabled and StartAutoHop then task.spawn(StartAutoHop)
+      elseif StartJunkyard then task.spawn(StartJunkyard) end
+    end
+  end
+})
+AutoFarmTab:CreateSlider({
+  name = "Minimum Buy Value", range = {0, 500000}, increment = 5000,
+  value = MinimumValue, suffix = "$",
+  callback = function(Value) MinimumValue = Value end
+})
+AutoHopToggle = AutoFarmTab:CreateToggle({
+  name = "Auto Serverhop until snipe",
+  flag = "AutoServerhopUntilSnipe", default = AutoHopEnabled,
+  callback = function(Value)
+    AutoHopEnabled = Value == true
+    if AutoHopEnabled and enabled then
+      enabled = false
+      if CustomerJobsToggle then CustomerJobsToggle:Set(false) end
+    end
+    if AutoHopEnabled and StartAutoHop then task.spawn(StartAutoHop) end
+  end
+})
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local Player = Players.LocalPlayer
+local VirtualUser = game:GetService("VirtualUser")
+Player.Idled:Connect(function()
+  VirtualUser:CaptureController()
+  VirtualUser:ClickButton2(Vector2.new(0, 0))
+end)
+local Reflect = Player:WaitForChild("PlayerData"):WaitForChild("__REFLECT")
+local JobsRoot = Reflect:WaitForChild("CustomerJobs")
+local ActiveJobs = JobsRoot:WaitForChild("ActiveJobs")
+local Offers = JobsRoot:WaitForChild("Offers")
+local PendingDeliveries = Reflect:WaitForChild("PendingDeliveries")
+
+local Cars = workspace:WaitForChild("__PLAYERCARS")
+local Debris = workspace:WaitForChild("__DEBRIS")
+local function GetLooseRoot()
+  return Debris:FindFirstChild("LooseParts")
+end
+local function GetBoxes()
+  return Debris:FindFirstChild("PartDeliveryBoxes")
+end
+local function InBoxes(Box)
+  local Boxes = GetBoxes()
+  return Boxes ~= nil and Box:IsDescendantOf(Boxes)
+end
+local F = RS:WaitForChild("Remotes"):WaitForChild("Functions")
+local E = RS.Remotes:WaitForChild("Events")
+local Detach = F.DetachEnginePart
+local Install = F.InstallEngineComponent
+local Order = F.OrderStorePart
+local Open = F.OpenPartDelivery
+local DetachBattery = F.DetachChassisPart
+local InstallBattery = F.InstallChassisPart
+local Complete = F.CompleteCustomerJob
+local Accept = F.AcceptCustomerJob
+local Cancel = F.CancelCustomerJob
+local Repair = E.RepairPart
+local WithdrawPart = F:WaitForChild("WithdrawPart")
+
+local EngineIds = {
+  WRXRS = "inline-4",
+  CivicSI = "inline-4",
+  ["350z"] = "inline-6",
+  E92M3 = "v8",
+  NAMiata = "inline-4"
+}
+local StoreParts = {
+  Wiring = "wiring", Intercooler = "intercooler",
+  IntakeManifold = "intake-manifold", ExhaustManifold = "exhaust-manifold",
+  ValveCover = "valve-cover", Radiator = "radiator",
+  Block = "block", Transmission = "transmission"
+}
+local EngineOrder = {
+  "Wiring", "Intercooler", "IntakeManifold", "ExhaustManifold",
+  "ValveCover", "Radiator", "Block", "Transmission"
+}
+
+local CFG = {
+  ClaimInterval = 0.35, BetweenJobs = 1, FinishDelay = 0.75,
+  ActionGap = 0.05, CheckPeriod = 0.08,
+  ActionTimeout = 30, DeliveryTimeout = 120, StockSettle = 20, ReceiptGrace = 35,
+  BoxStableSeconds = 0.6, BoxOpenRetry = 3,
+  MaxRust = 3, MaxPolish = 3,
+  MaxPurchasesPerPart = 2, MaxOrderRounds = 8
+}
+
+local function Loose()
+  local Root = GetLooseRoot()
+  return Root and Root:FindFirstChild(tostring(Player.UserId))
+end
+local function NumberAttr(Object, Key)
+  local V = Object and Object:GetAttribute(Key)
+  return typeof(V) == "number" and V or nil
+end
+local function Normalize(Value)
+  return typeof(Value) == "string"
+    and Value:lower():gsub("[^%w]", "") or ""
+end
+local ResolveNames = {}
+for Name, Id in pairs(StoreParts) do
+  ResolveNames[Name:lower()] = Name
+  ResolveNames[Id:gsub("-", "")] = Name
+end
+local function Find(Folder, Name)
+  return Folder and (Folder:FindFirstChild(Name)
+    or Folder:FindFirstChild(Name, true))
+end
+local function WaitFor(Check, Limit)
+  local EndAt = os.clock() + (Limit or CFG.ActionTimeout)
+  repeat
+    local OK, Yes = pcall(Check)
+    if OK and Yes then return true end
+    task.wait(CFG.CheckPeriod)
+  until os.clock() >= EndAt
+  return false
+end
+local function IsComplete(Part)
+  return NumberAttr(Part, "Damage") == 100
+    and NumberAttr(Part, "Rust") == 0
+end
+local function LooseCandidates(Name)
+  local Folder, Result = Loose(), {}
+  if not Folder then return Result end
+
+  for _, Part in ipairs(Folder:GetDescendants()) do
+    if Part.Name == Name
+      and (Part:IsA("Model") or Part:IsA("BasePart"))
+      and NumberAttr(Part, "Damage") ~= nil then
+      local NestedDuplicate = false
+      local Parent = Part.Parent
+      while Parent and Parent ~= Folder do
+        if Parent.Name == Name
+          and NumberAttr(Parent, "Damage") ~= nil then
+          NestedDuplicate = true
+          break
+        end
+        Parent = Parent.Parent
+      end
+      if not NestedDuplicate then
+        table.insert(Result, Part)
+      end
+    end
+  end
+  return Result
+end
+local function InventorySnapshot(Excluded)
+  local Inventory = {}
+  local Folder = Loose()
+  if not Folder then return Inventory end
+  for _, Part in ipairs(Folder:GetDescendants()) do
+    if StoreParts[Part.Name]
+      and (Part:IsA("BasePart") or Part:IsA("Model"))
+      and not (Excluded and Excluded[Part])
+      and IsComplete(Part) then
+      local Nested = false
+      local Parent = Part.Parent
+      while Parent and Parent ~= Folder do
+        if Parent.Name == Part.Name and IsComplete(Parent) then
+          Nested = true
+          break
+        end
+        Parent = Parent.Parent
+      end
+      if not Nested then
+        local Bucket = Inventory[Part.Name]
+        if not Bucket then
+          Bucket = {}
+          Inventory[Part.Name] = Bucket
+        end
+        table.insert(Bucket, Part)
+      end
+    end
+  end
+  return Inventory
+end
+local WithdrawCooldowns = {}
+local PendingLooseUUIDs = {}
+
+local function VisibleLooseUUIDs()
+  local Found = {}
+  local Folder = Loose()
+  if not Folder then return Found end
+  for _, Part in ipairs(Folder:GetDescendants()) do
+    local UUID = Part:GetAttribute("ItemUUID")
+    if typeof(UUID) == "string" and UUID ~= "" then
+      Found[UUID] = Part
+    end
+  end
+  return Found
+end
+local function MissingInventoryParts(Id)
+  local Visible = VisibleLooseUUIDs()
+  local Missing = {}
+  local Inventory = Reflect:FindFirstChild("Inventory")
+  if Inventory then
+    for _, Entry in ipairs(Inventory:GetChildren()) do
+      if tonumber(Entry.Name) then
+        local Metadata, UUID = Entry:FindFirstChild("Metadata"), Entry:GetAttribute("UUID")
+        if Metadata and tostring(Metadata:GetAttribute("CustomerJobId")) == tostring(Id)
+          and typeof(UUID) == "string" and UUID ~= "" and not Visible[UUID] then
+          table.insert(Missing, {uuid = UUID})
+        end
+      end
+    end
+  end
+  local Pending = PendingLooseUUIDs[Id]
+  if Pending then
+    for UUID in pairs(Pending) do
+      if Visible[UUID] then Pending[UUID] = nil end
+    end
+    if next(Pending) == nil then PendingLooseUUIDs[Id] = nil end
+  end
+  return Missing, Visible
+end
+local function WithdrawJobParts(Id, Missing)
+  Missing = Missing or MissingInventoryParts(Id)
+  if #Missing == 0 and not PendingLooseUUIDs[Id] then return true, false end
+
+  local Pending = PendingLooseUUIDs[Id] or {}
+  PendingLooseUUIDs[Id] = Pending
+  local Sent = WithdrawCooldowns[Id] or {}
+  WithdrawCooldowns[Id] = Sent
+  local Now = os.clock()
+
+  for _, Part in ipairs(Missing) do
+    Pending[Part.uuid] = true
+    if not Sent[Part.uuid] or Now - Sent[Part.uuid] >= 3 then
+      Sent[Part.uuid] = Now
+      task.spawn(function()
+        pcall(function() WithdrawPart:InvokeServer(Part.uuid) end)
+      end)
+    end
+  end
+  local Deadline = os.clock() + 8
+  repeat
+    local Visible = VisibleLooseUUIDs()
+    local Remaining = 0
+    for UUID in pairs(Pending) do
+      if Visible[UUID] then
+        Pending[UUID] = nil
+      else
+        Remaining += 1
+      end
+    end
+    if Remaining == 0 then
+      PendingLooseUUIDs[Id] = nil
+      SetProgress(1, "Customer parts recovered")
+      return true, true
+    end
+    SetProgress(1, "Waiting for " .. Remaining .. " withdrawn parts...")
+    task.wait(0.2)
+  until os.clock() >= Deadline
+  return false, true
+end
+local function ResetRecoveredPlan(State)
+  State.planned = false
+  State.cleanDone = false
+  State.repairList = {}
+  State.problems = {}
+  State.statuses = {}
+  State.originallyDetached = {}
+  State.remoteSent = {}
+  State.excluded = {}
+  State.required = {}
+end
+local JobStates = {}
+local OpenAttempts, OpenedBoxes, IgnoredInspections = {}, {}, {}
+
+local function TaskDone(Task)
+  if Task:GetAttribute("IsComplete") == true then return true end
+  if Task:GetAttribute("IsComplete") == false then return false end
+  local P = Task:GetAttribute("Progress")
+  local Required = Task:GetAttribute("RequiredProgress")
+  return typeof(P) == "number" and typeof(Required) == "number"
+    and Required > 0 and P >= Required
+end
+local function IsInspectionJob(Job)
+  if Normalize(Job:GetAttribute("Type")) == "vehicleinspection" then
+    return true, "job Type=VehicleInspection"
+  end
+  local Tasks = Job:FindFirstChild("Tasks")
+  if not Tasks then return false end
+
+  for _, Task in ipairs(Tasks:GetChildren()) do
+    if tonumber(Task.Name) and not TaskDone(Task) then
+      local TaskType = Normalize(Task:GetAttribute("Type"))
+      local Target = Normalize(Task:GetAttribute("Target"))
+      local Label = Normalize(Task:GetAttribute("Name"))
+      local Description = Normalize(Task:GetAttribute("Description"))
+      if TaskType == "vehicleinspection"
+        or TaskType == "inspectvehicle"
+        or TaskType == "inspectthevehicle"
+        or (TaskType == "inspect" and Target == "vehicle")
+        or (TaskType == "inspection" and Target == "vehicle")
+        or Target == "vehicleinspection"
+        or Target == "inspectvehicle"
+        or Target == "inspectthevehicle"
+        or Label == "inspectthevehicle"
+        or Description == "inspectthevehicle" then
+        return true, "task " .. Task.Name .. " (" ..
+          tostring(Task:GetAttribute("Type")) .. "/" ..
+          tostring(Task:GetAttribute("Target")) .. ")"
+      end
+    end
+  end
+  return false
+end
+local function AllTasksDone(Job)
+  local Tasks = Job:FindFirstChild("Tasks")
+  if not Tasks then return false end
+  for _, Task in ipairs(Tasks:GetChildren()) do
+    if tonumber(Task.Name) and not TaskDone(Task) then return false end
+  end
+  return true
+end
+local function Disassemble(Ctx)
+  local State = Ctx.state
+
+  for _, Name in ipairs(Ctx.sequence) do
+    local Installed = Find(Ctx.engine, Name)
+    if not Installed then
+      State.statuses[Name] = "Absent"
+      continue
+    end
+    local Before = {}
+    for _, Part in ipairs(LooseCandidates(Name)) do Before[Part] = true end
+
+    local OK = pcall(function()
+      return Detach:InvokeServer(Installed)
+    end)
+    if not OK then
+      State.statuses[Name] = "Failed"
+      continue
+    end
+    local NewPart
+    local Confirmed = WaitFor(function()
+      for _, Part in ipairs(LooseCandidates(Name)) do
+        if Part == Installed or not Before[Part] then
+          NewPart = Part
+          return true
+        end
+      end
+      return false
+    end)
+    if Confirmed then
+      State.originallyDetached[Name] = NewPart
+      State.statuses[Name] = "Detached"
+    else
+      State.statuses[Name] = "Failed"
+    end
+    task.wait(CFG.ActionGap)
+  end
+end
+local function BuildPlan(Ctx)
+  local State = Ctx.state
+  local Req = Ctx.tasks.required
+
+  for Name, Count in pairs(Req) do State.required[Name] = Count end
+
+  for _, Name in ipairs(Ctx.sequence) do
+    local Original = State.originallyDetached[Name]
+    local Status = State.statuses[Name]
+    local Candidates = LooseCandidates(Name)
+    if not Original then
+      for _, Part in ipairs(Candidates) do
+        if not IsComplete(Part) then Original = Part break end
+      end
+    end
+    local Damage = NumberAttr(Original, "Damage")
+    local Rust = NumberAttr(Original, "Rust")
+    local RequiresStock = State.required[Name] ~= nil
+
+    if Damage ~= nil and Damage < 15 then
+      RequiresStock = true
+      State.required[Name] = 1
+    end
+    local KnownOriginal = State.originallyDetached[Name]
+    if KnownOriginal and RequiresStock then
+      State.excluded[KnownOriginal] = true
+    end
+    if Original and Damage ~= nil and Damage < 15 then
+      State.excluded[Original] = true
+    end
+    local HasReady = false
+    for _, Part in ipairs(Candidates) do
+      if not State.excluded[Part] and IsComplete(Part) then
+        HasReady = true
+        break
+      end
+    end
+    if Status == "Failed" then
+      State.problems[Name] = "Detachment failed; component may still be installed"
+    elseif RequiresStock then
+    elseif Original and Damage ~= nil and Rust ~= nil then
+      table.insert(State.repairList, Original)
+    elseif HasReady then
+    elseif Status == "Absent" and Ctx.tasks.targets[Name] then
+      State.required[Name] = 1
+    else
+      State.problems[Name] = "No suitable loose component or replacement task"
+    end
+  end
+end
+local function RepairStage(State, Part, Kind)
+  local Key = Kind == "Rust" and "Rust" or "Damage"
+  local function Done()
+    local V = NumberAttr(Part, Key)
+    return V and (Kind == "Rust" and V <= 0
+      or Kind == "Wear" and V >= 100)
+  end
+  if Done() then return true end
+
+  local Record = State.remoteSent[Part]
+  if not Record then Record = {} State.remoteSent[Part] = Record end
+  if Record[Kind] then
+    return WaitFor(Done, 2)
+  end
+  Record[Kind] = true
+  local OK = pcall(function()
+    Repair:FireServer(Part, Kind)
+  end)
+  if not OK then
+    return false
+  end
+  if not WaitFor(Done) then
+    return false
+  end
+  return true
+end
+local function CleanEngine(Ctx)
+  local List, State = Ctx.state.repairList, Ctx.state
+
+  if #List == 0 then return true end
+
+  local RustQueue, PolishQueue = {}, {}
+  for _, Part in ipairs(List) do
+    if (NumberAttr(Part, "Rust") or math.huge) > 0 then
+      table.insert(RustQueue, Part)
+    else
+      table.insert(PolishQueue, Part)
+    end
+  end
+  local NextRust, NextPolish = 1, 1
+  local RustDone, PolishDone, Failed = 0, 0, {}
+  local RustWorkers = math.min(CFG.MaxRust, #RustQueue)
+  local PolishWorkers = math.min(CFG.MaxPolish, #List)
+
+  for _ = 1, RustWorkers do
+    task.spawn(function()
+      local OK, Error = pcall(function()
+        while true do
+          local Index = NextRust
+          NextRust += 1
+          local Part = RustQueue[Index]
+          if not Part then break end
+          if RepairStage(State, Part, "Rust") then
+            table.insert(PolishQueue, Part)
+          else
+            Failed[Part.Name] = "Rust incomplete"
+          end
+        end
+      end)
+      if not OK then Failed.System = tostring(Error) end
+      RustDone += 1
+    end)
+  end
+  for _ = 1, PolishWorkers do
+    task.spawn(function()
+      local OK, Error = pcall(function()
+        while true do
+          local Part = PolishQueue[NextPolish]
+          if Part then
+            NextPolish += 1
+            if not RepairStage(State, Part, "Wear") then
+              Failed[Part.Name] = "Polishing incomplete"
+            end
+          elseif RustDone >= RustWorkers then
+            break
+          else
+            task.wait(0.1)
+          end
+        end
+      end)
+      if not OK then Failed.System = tostring(Error) end
+      PolishDone += 1
+    end)
+  end
+  while RustDone < RustWorkers or PolishDone < PolishWorkers do
+    task.wait(0.1)
+  end
+  for _, Part in ipairs(List) do
+    if not IsComplete(Part) then
+      Failed[Part.Name] = Failed[Part.Name] or "Condition below 100/0"
+    end
+  end
+  return next(Failed) == nil
+end
+local function ServiceBattery(Ctx)
+  local Chassis = Find(Ctx.car, "ChassisParts")
+  if not Chassis then return false, "ChassisParts missing" end
+
+  local Installed = Find(Chassis, "Battery")
+  local Battery
+  if Installed then
+    local Before = {}
+    for _, Part in ipairs(LooseCandidates("Battery")) do Before[Part] = true end
+    local OK, Error = pcall(function()
+      DetachBattery:InvokeServer(Installed)
+    end)
+    if not OK then return false, tostring(Error) end
+    if not WaitFor(function()
+      for _, Part in ipairs(LooseCandidates("Battery")) do
+        if Part == Installed or not Before[Part] then
+          Battery = Part
+          return true
+        end
+      end
+    end) then
+      return false, "Battery detachment not confirmed"
+    end
+  else
+    Battery = LooseCandidates("Battery")[1]
+    if not Battery then return false, "Battery missing" end
+  end
+  if (NumberAttr(Battery, "Damage") or -1) < 100 then
+    local OK, Error = pcall(function()
+      Repair:FireServer(Battery, "Charge")
+    end)
+    if not OK then return false, tostring(Error) end
+    if not WaitFor(function()
+      return NumberAttr(Battery, "Damage") == 100
+    end) then
+      return false, "Battery did not reach 100"
+    end
+  end
+  local OK, Error = pcall(function()
+    InstallBattery:InvokeServer(Ctx.car, Battery, nil)
+  end)
+  if not OK then return false, tostring(Error) end
+  if not WaitFor(function()
+    return Find(Chassis, "Battery") ~= nil
+      and (not GetLooseRoot() or not Battery:IsDescendantOf(GetLooseRoot()))
+  end) then
+    return false, "Battery reinstallation unconfirmed"
+  end
+  return true
+end
+local function BoxId(Box)
+  return Box.Name:match("^Delivery_([%w%-]+)$")
+end
+local function BoxPosition(Box)
+  if Box:IsA("BasePart") then return Box.Position end
+  if Box:IsA("Model") then return Box:GetPivot().Position end
+end
+local function OpenBox(Box)
+  local Id = BoxId(Box)
+  if not Id then return false end
+  if not InBoxes(Box) then return true end
+  local Previous = OpenAttempts[Id]
+  if Previous and os.clock() - Previous < CFG.BoxOpenRetry then
+    return false
+  end
+  local PreviousPos, Stable = BoxPosition(Box), 0
+  if not PreviousPos then return false end
+  local Start, Stationary = os.clock(), false
+  while InBoxes(Box) and os.clock() - Start < CFG.ActionTimeout do
+    task.wait(0.2)
+    local Position = BoxPosition(Box)
+    if not Position then return false end
+    Stable = (Position - PreviousPos).Magnitude <= 0.1 and Stable + 0.2 or 0
+    if Stable >= CFG.BoxStableSeconds then Stationary = true break end
+    PreviousPos = Position
+  end
+  if not Stationary then return false end
+  OpenAttempts[Id] = os.clock()
+  local OK, Response = pcall(function()
+    return Open:InvokeServer(Id)
+  end)
+  if not OK or Response == false then
+    return false
+  end
+  local Removed = WaitFor(function()
+    return not InBoxes(Box)
+  end, 8)
+  if Removed then
+    OpenedBoxes[Id] = os.clock()
+    OpenAttempts[Id] = nil
+  end
+  return Removed
+end
+local function ExistingBoxes()
+  local Boxes = GetBoxes()
+  if not Boxes then return {} end
+
+  local Found = {}
+
+  for _, Box in ipairs(Boxes:GetChildren()) do
+    if BoxId(Box) then
+      table.insert(Found, Box)
+    end
+  end
+  return Found
+end
+local function RecoverBoxes()
+  local Boxes = GetBoxes()
+  if not Boxes then return true, false end
+  local Found = false
+  for _, Entry in ipairs(PendingDeliveries:GetChildren()) do
+    if tonumber(Entry.Name) then
+      local Id = Entry:GetAttribute("Id")
+      if typeof(Id) == "string" and Id ~= "" and not OpenedBoxes[Id] then
+        local Box = Boxes:FindFirstChild("Delivery_" .. Id)
+        if Box then
+          Found = true
+          if not OpenBox(Box) then return false, true end
+        end
+      end
+    end
+  end
+  return true, Found
+end
+local function PendingEntryIds()
+  local Ids = {}
+  for _, Entry in ipairs(PendingDeliveries:GetChildren()) do
+    if tonumber(Entry.Name) then
+      local Id = Entry:GetAttribute("Id")
+      if typeof(Id) == "string" and Id ~= "" then
+        Ids[Id] = true
+      end
+    end
+  end
+  return Ids
+end
+local function AnyPendingEntries()
+  for _, Entry in ipairs(PendingDeliveries:GetChildren()) do
+    if tonumber(Entry.Name) then
+      local Id = Entry:GetAttribute("Id")
+      if typeof(Id) ~= "string" or not OpenedBoxes[Id] then
+        return true
+      end
+    end
+  end
+  return false
+end
+local function Shortages(Ctx)
+  local Stock = InventorySnapshot(Ctx.state.excluded)
+  local Missing = {}
+  for Name, Need in pairs(Ctx.state.required) do
+    local Count = Stock[Name] and #Stock[Name] or 0
+    local Deficit = math.max(0, Need - Count)
+    if Deficit > 0 then Missing[Name] = Deficit end
+  end
+  return Missing
+end
+local function FindOrderBox(Purchase)
+  local Boxes = GetBoxes()
+  if not Boxes then return nil end
+
+  if Purchase.box and InBoxes(Purchase.box) then
+    return Purchase.box
+  end
+  local CurrentIds = PendingEntryIds()
+
+  for Id in pairs(CurrentIds) do
+    if not Purchase.beforePending[Id] then
+      local Match = Boxes:FindFirstChild("Delivery_" .. Id)
+
+      if Match then
+        Purchase.deliveryId = Id
+        Purchase.box = Match
+        return Match
+      end
+    end
+  end
+  local New, Count = nil, 0
+
+  for _, Box in ipairs(ExistingBoxes()) do
+    if not Purchase.beforeBoxes[Box] then
+      New = Box
+      Count += 1
+    end
+  end
+  if Count == 1 then
+    Purchase.box = New
+    Purchase.deliveryId = BoxId(New)
+    return New
+  end
+  return nil
+end
+local function OrderHold(State, Message)
+  State.orderReason = Message
+  SetProgress(3, Message)
+  return false
+end
+local function SettlePurchase(Ctx)
+  local Purchase = Ctx.state.purchase
+  if not Purchase then return true end
+
+  local function ReceivedAll()
+    local Stock = InventorySnapshot(Ctx.state.excluded)
+    local Missing = {}
+    for Name, Count in pairs(Purchase.submitted) do
+      local Have = Stock[Name] and #Stock[Name] or 0
+      if Have < (Purchase.beforeCounts[Name] or 0) + Count then
+        table.insert(Missing, Name)
+      end
+    end
+    return #Missing == 0, Missing
+  end
+
+  local Complete = ReceivedAll()
+  if Complete then
+    Ctx.state.purchase = nil
+    return true
+  end
+
+  local Box = FindOrderBox(Purchase)
+  if Box and not Purchase.opened then
+    SetProgress(3, "Opening ordered parts...")
+    if not OpenBox(Box) then
+      return OrderHold(Ctx.state, "Waiting for ordered delivery box...")
+    end
+    Purchase.opened = true
+    Purchase.deliveryId = BoxId(Box)
+    Purchase.openedAt = os.clock()
+  elseif not Box and Purchase.deliveryId and OpenedBoxes[Purchase.deliveryId] then
+    Purchase.opened = true
+    Purchase.openedAt = Purchase.openedAt or os.clock()
+  end
+
+  Complete = ReceivedAll()
+  if Complete then
+    Ctx.state.purchase = nil
+    return true
+  end
+
+  if not Purchase.opened then
+    if os.clock() - Purchase.startedAt >= CFG.DeliveryTimeout then
+      return OrderHold(Ctx.state, "Delivery not detected; purchase held")
+    end
+    return OrderHold(Ctx.state, "Waiting for part delivery...")
+  end
+
+  local _, Missing = ReceivedAll()
+  table.sort(Missing)
+  if os.clock() - (Purchase.openedAt or os.clock()) >= CFG.ReceiptGrace then
+    return OrderHold(Ctx.state, "Delivery short: " .. table.concat(Missing, ", "))
+  end
+  return OrderHold(Ctx.state, "Receiving: " .. table.concat(Missing, ", "))
+end
+local function OrderParts(Ctx)
+  local State = Ctx.state
+  State.orderReason = nil
+  for _ = 1, CFG.MaxOrderRounds do
+    local MissingInventory = MissingInventoryParts(Ctx.id)
+    if #MissingInventory > 0 or PendingLooseUUIDs[Ctx.id] then
+      local Ready, Recovered = WithdrawJobParts(Ctx.id, MissingInventory)
+      if Recovered then State.pendingRecoveryReplan = true end
+      if not Ready then return OrderHold(State, "Recovering customer inventory...") end
+      return OrderHold(State, "Rechecking recovered customer parts...")
+    end
+
+    if State.purchase then
+      if not SettlePurchase(Ctx) then return false end
+    end
+    if next(Shortages(Ctx)) == nil then return true end
+
+    if State.orderRetryAt and os.clock() < State.orderRetryAt then
+      return OrderHold(State, "Retrying rejected order...")
+    end
+    if AnyPendingEntries() then
+      local Opened, HadBox = RecoverBoxes()
+      if not Opened then
+        return OrderHold(State, "Waiting for previous delivery box...")
+      end
+      if HadBox then
+        local Until = os.clock() + 2
+        repeat
+          if next(Shortages(Ctx)) == nil then return true end
+          task.wait(0.15)
+        until os.clock() >= Until
+      end
+      if AnyPendingEntries() then
+        return OrderHold(State, "Waiting for pending deliveries...")
+      end
+    end
+    if ActiveJobs:FindFirstChild("1") ~= Ctx.job then return false end
+
+    local Missing = Shortages(Ctx)
+    local Payload, Submitted = {}, {}
+    for Name, Count in pairs(Missing) do
+      if (State.attempts[Name] or 0) >= CFG.MaxPurchasesPerPart then
+        return OrderHold(State, "Order limit reached: " .. Name)
+      end
+      local Prefix, Suffix = EngineIds[Ctx.car.Name], StoreParts[Name]
+      local Id = Prefix and Suffix and (Prefix .. "-" .. Suffix .. "-stock")
+      if not Id then
+        return OrderHold(State, "Unknown store item: " .. Name)
+      end
+      table.insert(Payload, {Id = Id, Class = "PartVariants", Count = Count})
+      Submitted[Name] = Count
+    end
+    if #Payload == 0 then return true end
+    table.sort(Payload, function(A, B) return A.Id < B.Id end)
+
+    local BeforeBoxes = {}
+    for _, Box in ipairs(ExistingBoxes()) do BeforeBoxes[Box] = true end
+    local Stock, BeforeCounts = InventorySnapshot(State.excluded), {}
+    for Name in pairs(Submitted) do
+      BeforeCounts[Name] = Stock[Name] and #Stock[Name] or 0
+    end
+
+    if ActiveJobs:FindFirstChild("1") ~= Ctx.job then return false end
+    local InventoryCheck = MissingInventoryParts(Ctx.id)
+    if #InventoryCheck > 0 or PendingLooseUUIDs[Ctx.id] then
+      local _, Recovered = WithdrawJobParts(Ctx.id, InventoryCheck)
+      if Recovered then State.pendingRecoveryReplan = true end
+      return OrderHold(State, "Recovering customer inventory...")
+    end
+    if AnyPendingEntries() then
+      return OrderHold(State, "Waiting for pending deliveries...")
+    end
+
+    local Latest = Shortages(Ctx)
+    if next(Latest) == nil then return true end
+    local Changed = false
+    for Name, Count in pairs(Submitted) do
+      if Latest[Name] ~= Count then Changed = true break end
+    end
+    if Changed then return OrderHold(State, "Rechecking stock changes...") end
+
+    State.purchase = {
+      submitted = Submitted, beforeBoxes = BeforeBoxes,
+      beforeCounts = BeforeCounts, beforePending = PendingEntryIds(),
+      startedAt = os.clock(), opened = false
+    }
+    SetProgress(3, "Ordering " .. #Payload .. " part type(s)...")
+    local OK, Response = pcall(function() return Order:InvokeServer(Payload) end)
+    if not OK or Response == false then
+      if not OK then
+        return OrderHold(State, "Order response unclear; checking delivery...")
+      end
+      State.purchase = nil
+      State.orderRetryAt = os.clock() + 3
+      return OrderHold(State, "Order rejected; retrying...")
+    end
+    for Name in pairs(Submitted) do
+      State.attempts[Name] = (State.attempts[Name] or 0) + 1
+    end
+    return SettlePurchase(Ctx)
+  end
+  return false
+end
+local function Assemble(Ctx)
+  local Used = {}
+  local Stock = InventorySnapshot(Ctx.state.excluded)
+  for I = #Ctx.sequence, 1, -1 do
+    local Name = Ctx.sequence[I]
+
+    local Installed = Find(Ctx.engine, Name)
+    if Installed then continue end
+
+    local Candidates = Stock[Name] or {}
+    local Part
+    for _, Candidate in ipairs(Candidates) do
+      if not Used[Candidate] then
+        Part = Candidate
+        break
+      end
+    end
+    if not Part then
+      SetProgress(4, "Missing ready part: " .. Name)
+      return false
+    end
+    Used[Part] = true
+    local OK, Result = pcall(function()
+      return Install:InvokeServer(Ctx.car, Part, nil)
+    end)
+    if not OK or Result == false or not WaitFor(function()
+      local Root = GetLooseRoot()
+      return Find(Ctx.engine, Name) ~= nil
+        and (not Root or not Part:IsDescendantOf(Root))
+    end) then
+      SetProgress(4, "Installation not confirmed: " .. Name)
+      return false
+    end
+    task.wait(CFG.ActionGap)
+  end
+  return true
+end
+local function CompleteJob(Ctx)
+  SetProgress(5, "Completing customer job...")
+  if not WaitFor(function() return AllTasksDone(Ctx.job) end) then
+    return false
+  end
+  task.wait(CFG.FinishDelay)
+  if ActiveJobs:FindFirstChild("1") ~= Ctx.job then
+    return false
+  end
+  local State = Ctx.state
+  if not State.completionSent then
+    State.completionSent = true
+    local OK, Result = pcall(function()
+      return Complete:InvokeServer(Ctx.id)
+    end)
+    if not OK or Result == false then
+      return false
+    end
+  end
+  local Finished = WaitFor(function()
+    return ActiveJobs:FindFirstChild("1") ~= Ctx.job
+  end)
+  if Finished then
+    JobStates[Ctx.id] = nil
+    SetProgress(6, "Customer job completed!")
+  end
+  return Finished
+end
+local function ProcessJob(Job, Car, Id)
+  SetProgress(1, "Preparing customer job...")
+  if IsInspectionJob(Job) then return false end
+  local State = JobStates[Id]
+  if not State then
+    State = {
+      attempts = {}, remoteSent = {}, originallyDetached = {},
+      excluded = {}, required = {}, repairList = {},
+      problems = {}, statuses = {}, purchase = nil,
+      planned = false, cleanDone = false, batteryDone = false,
+      engineDone = false, completionSent = false
+    }
+    JobStates[Id] = State
+  end
+  if State.engineDone or AllTasksDone(Job) then
+    return CompleteJob({job=Job, id=Id, state=State})
+  end
+  if not Car then
+    return false
+  end
+  if not EngineIds[Car.Name] then
+    return false
+  end
+  local Folder = Job:FindFirstChild("Tasks")
+  if not Folder then return false end
+  local Tasks = {required = {}, targets = {}, battery = false}
+  for _, Task in ipairs(Folder:GetChildren()) do
+    if tonumber(Task.Name) and not TaskDone(Task) then
+      local Target = Normalize(Task:GetAttribute("Target"))
+      if Target == "battery" then
+        Tasks.battery = true
+      else
+        local Name = ResolveNames[Target]
+        if Name then Tasks.targets[Name] = true end
+        if Task:GetAttribute("IsScrapped") == true
+          or (Task:GetAttribute("Type") == "InstallEngineComponent"
+            and Normalize(Task:GetAttribute("RequiredValue")) == "stock") then
+          if not Name then return false end
+          Tasks.required[Name] = 1
+        end
+      end
+    end
+  end
+
+  if not next(Tasks.targets) and not next(Tasks.required) then
+    if Tasks.battery then
+      local Missing = MissingInventoryParts(Id)
+      if #LooseCandidates("Battery") == 0 and (#Missing > 0 or PendingLooseUUIDs[Id]) then
+        local Ready = WithdrawJobParts(Id, Missing)
+        if not Ready then return false, "recovery" end
+      end
+      SetProgress(3, "Charging battery...")
+      local BatteryCtx = {job=Job, id=Id, car=Car, state=State}
+      if not State.batteryDone then
+        local OK, Reason = ServiceBattery(BatteryCtx)
+        if not OK then   return false end
+        State.batteryDone = true
+      end
+      State.engineDone = true
+      return CompleteJob(BatteryCtx)
+    end
+    return false
+  end
+  local Engine = Find(Car:FindFirstChild("Misc"), "Engine")
+  if not Engine then   return false end
+  local Ctx = {
+    job = Job, id = Id, car = Car, engine = Engine,
+    tasks = Tasks, state = State
+  }
+
+  if not State.sequence then
+    State.sequence = {}
+    local Intercooler = Find(Engine, "Intercooler") ~= nil
+      or Tasks.targets.Intercooler or Tasks.required.Intercooler ~= nil
+    for _, Name in ipairs(EngineOrder) do
+      if Name ~= "Intercooler" or Intercooler then
+        table.insert(State.sequence, Name)
+      end
+    end
+  end
+  Ctx.sequence = State.sequence
+
+  local Missing = MissingInventoryParts(Id)
+  if #Missing > 0 or PendingLooseUUIDs[Id] then
+    local Ready, Recovered = WithdrawJobParts(Id, Missing)
+    if not Ready then return false, "recovery" end
+    if Recovered and State.planned then ResetRecoveredPlan(State) end
+  end
+  if not State.planned then
+    SetProgress(2, "Disassembling engine...")
+    Disassemble(Ctx)
+    BuildPlan(Ctx)
+    State.planned = true
+  end
+  SetProgress(3, "Cleaning / Ordering parts...")
+  local CleanOK, OrderOK, BatteryOK = State.cleanDone, false,
+    (not Tasks.battery) or State.batteryDone
+  local CleanFinished = CleanOK
+  local OrderFinished = false
+  local BatteryFinished = BatteryOK
+
+  task.spawn(function()
+    local OK, Result = pcall(OrderParts, Ctx)
+    OrderOK = OK and Result == true
+    OrderFinished = true
+  end)
+  if not State.cleanDone then
+    task.spawn(function()
+      local OK, Result = pcall(CleanEngine, Ctx)
+      CleanOK = OK and Result == true
+      State.cleanDone = CleanOK
+      CleanFinished = true
+    end)
+  end
+  if not BatteryFinished then
+    task.spawn(function()
+      local OK, Result = pcall(ServiceBattery, Ctx)
+      BatteryOK = OK and Result == true
+      State.batteryDone = BatteryOK
+      BatteryFinished = true
+    end)
+  end
+  while not (CleanFinished and OrderFinished and BatteryFinished) do
+    task.wait(0.1)
+  end
+  if State.pendingRecoveryReplan then
+    State.pendingRecoveryReplan = nil
+    ResetRecoveredPlan(State)
+    SetProgress(1, "Rechecking recovered customer parts...")
+    return false, "recovery"
+  end
+  for Name, Reason in pairs(State.problems) do
+    return false, Name .. ": " .. Reason
+  end
+  if not CleanOK then return false, "Cleaning incomplete" end
+  if not OrderOK then
+    if #MissingInventoryParts(Id) > 0 or PendingLooseUUIDs[Id] then
+      SetProgress(3, "Recovering inventory before ordering...")
+      return false, "recovery"
+    end
+    return false, State.orderReason or "Ordering or stock check incomplete"
+  end
+  if not BatteryOK then return false, "Battery service incomplete" end
+
+  if not State.engineDone then
+    SetProgress(4, "Reassembling engine...")
+    if not Assemble(Ctx) then return false, "Reassembly incomplete" end
+    State.engineDone = true
+  end
+  return CompleteJob(Ctx)
+end
+local function DelayWhileOn(Seconds)
+  local EndAt = os.clock() + Seconds
+  while os.clock() < EndAt do
+    if not enabled then
+      return false
+    end
+    task.wait(0.1)
+  end
+  return true
+end
+AutoLoop = function()
+  local LastClaimId, LastClaimAt
+  while enabled do
+    local Job = ActiveJobs:FindFirstChild("1")
+    local Id = Job and Job:GetAttribute("Id")
+    if typeof(Id) ~= "string" or Id == "" then Job = nil end
+    local Car
+    if Job then
+      for _, Candidate in ipairs(Cars:GetChildren()) do
+        if tostring(Candidate:GetAttribute("CustomerJobId")) == Id then
+          Car = Candidate
+          break
+        end
+      end
+    end
+    if not Job and (JunkyardBusy or Player:GetAttribute("InShopInterior") == false) then
+      task.wait(0.2)
+    elseif Job then
+      local RetryDelay = 1.25
+      if IsInspectionJob(Job) then
+        SetProgress(1, "Skipping vehicle inspection...")
+        IgnoredInspections[Id] = true
+        local OK, Result = pcall(function() return Cancel:InvokeServer(Id) end)
+        if OK and Result ~= false then
+          WaitFor(function() return ActiveJobs:FindFirstChild("1") ~= Job end)
+          RetryDelay = CFG.ClaimInterval
+        end
+      else
+        local OK, Result, Reason = pcall(ProcessJob, Job, Car, Id)
+        if not OK then
+          SetProgress(currentStep, "Job error - retrying...")
+        elseif Result == true then
+          RetryDelay = CFG.BetweenJobs
+        elseif Result ~= true and Reason == "recovery" then
+          RetryDelay = 0.35
+        elseif Result ~= true then
+          if Reason then SetProgress(currentStep, Reason)
+          elseif currentStep ~= 4 then
+            SetProgress(currentStep, "Job incomplete - retrying...")
+          end
+        end
+      end
+      if not DelayWhileOn(RetryDelay) then break end
+    else
+      SetProgress(0, "Searching for customer jobs...")
+      local OfferId, BestPay = nil, -math.huge
+      for _, Offer in ipairs(Offers:GetChildren()) do
+        if tonumber(Offer.Name) then
+          local Id, Pay = Offer:GetAttribute("Id"), Offer:GetAttribute("Payment")
+          local Type = Normalize(Offer:GetAttribute("Type"))
+          if typeof(Id) == "string" and Id ~= ""
+            and typeof(Pay) == "number" and Pay > BestPay
+            and not IgnoredInspections[Id]
+            and Type ~= "vehicleinspection" and Type ~= "inspectvehicle" then
+            OfferId, BestPay = Id, Pay
+          end
+        end
+      end
+      if OfferId and not JunkyardBusy
+        and Player:GetAttribute("InShopInterior") ~= false
+        and (OfferId ~= LastClaimId or os.clock() - (LastClaimAt or 0) >= 0.8) then
+        LastClaimId, LastClaimAt = OfferId, os.clock()
+        SetProgress(1, "Claiming customer job...")
+        pcall(function() return Accept:InvokeServer(OfferId) end)
+      end
+      if not DelayWhileOn(CFG.ClaimInterval) then break end
+    end
+  end
+  running = false
+  SetProgress(0, "Paused")
+end
+local Cash = Player:WaitForChild("leaderstats"):WaitForChild("Cash")
+local function GetJunkyardCars()
+  local Root = workspace:FindFirstChild("__JUNKYARD")
+  return Root and Root:FindFirstChild("Cars")
+end
+local BuyCar = F:WaitForChild("BuyJunkyardCar")
+local ExitWorkshop = E:WaitForChild("RequestExitPlayerShop")
+local EnterWorkshop = F:WaitForChild("ShopVisitEnterOwn")
+local JunkyardUpdated = E:WaitForChild("JunkyardUpdated")
+local FinishLoading = E:WaitForChild("LoadingScreenFinished")
+local ActiveCars, Scanned = {}, {}
+local AutoHopRunning, ScanQueued = false, false
+local JunkyardRotation = 0
+
+local function EligibleCars()
+  local Result, Seen = {}, {}
+  local function Add(Id, Price, Model, Name)
+    if typeof(Id) ~= "string" or Id == "" then return end
+    if typeof(Price) ~= "number" or Price < MinimumValue then return end
+    if Scanned[Id] or Seen[Id] then return end
+    Seen[Id] = true
+    table.insert(Result, {Id = Id, Price = Price, Model = Model, Name = Name})
+  end
+  for _, Car in ipairs(ActiveCars) do
+    if typeof(Car) == "table" then Add(Car.Uuid, Car.Price, nil, Car.DirId) end
+  end
+  if Player:GetAttribute("InShopInterior") == false then
+    local Folder = GetJunkyardCars()
+    if Folder then
+      for _, Model in ipairs(Folder:GetChildren()) do
+        local Info = Model:FindFirstChild("__REFLECT")
+        if Info then
+          local CarName = Model.Name:gsub("^Junkyard_", "")
+          Add(Info:GetAttribute("Uuid"), Info:GetAttribute("Price"), Model, CarName)
+        end
+      end
+    end
+  end
+  table.sort(Result, function(A, B) return A.Price > B.Price end)
+  return Result
+end
+local function ScanJunkyard(Explore)
+  if not JunkyardEnabled or JunkyardBusy or SnipeSucceeded or SnipeUncertain then return end
+  if Player:GetAttribute("OnLoadingScreen") ~= false then return end
+  JunkyardBusy = true
+  local WasInside = Player:GetAttribute("InShopInterior") == true
+  local Matches = EligibleCars()
+  local Affordable = false
+  for _, Car in ipairs(Matches) do
+    if Car.Price <= Cash.Value then Affordable = true break end
+  end
+  local ShouldExit = WasInside and (Affordable or Explore)
+  local Outside = not WasInside
+  if ShouldExit then
+    local OK = pcall(function() ExitWorkshop:FireServer("GarageDoor") end)
+    Outside = OK and WaitFor(function()
+      return Player:GetAttribute("InShopInterior") == false
+    end, 15)
+  end
+  if Outside and JunkyardEnabled then
+    Matches = EligibleCars()
+    for _, Car in ipairs(Matches) do
+      if not JunkyardEnabled or Player:GetAttribute("InShopInterior") ~= false then break end
+      if Cash.Value < Car.Price or Scanned[Car.Id] then continue end
+      Scanned[Car.Id] = true
+      local Before = Cash.Value
+      local OK, Response = pcall(function()
+        return BuyCar:InvokeServer(Car.Id)
+      end)
+      if not OK or Response == false then
+        Scanned[Car.Id] = nil
+      else
+        local Until = os.clock() + 2
+        repeat
+          if Cash.Value < Before then break end
+          if Car.Model and Car.Model.Parent ~= GetJunkyardCars() then break end
+          task.wait(0.1)
+        until os.clock() >= Until
+        if Response == true or Cash.Value < Before
+          or (Car.Model and Car.Model.Parent ~= GetJunkyardCars()) then
+          SnipeSucceeded = true
+          AutoHopEnabled = false
+          JunkyardEnabled = false
+          if AutoHopToggle then AutoHopToggle:Set(false) end
+          if JunkyardToggle then JunkyardToggle:Set(false) end
+          pcall(function()
+            Window:Popup({
+              title = "Car Sniped!",
+              content = string.format("%s purchased for $%s",
+                Car.Name or Car.DirId or "Unknown Car", tostring(Car.Price)),
+              icon = "car-front", options = {{text = "OK"}}
+            })
+          end)
+        else
+          SnipeUncertain = true
+        end
+      end
+      if SnipeSucceeded or SnipeUncertain then break end
+      task.wait(0.3)
+    end
+  end
+  if WasInside and Outside then
+    pcall(function() EnterWorkshop:InvokeServer() end)
+    WaitFor(function()
+      return Player:GetAttribute("InShopInterior") == true
+    end, 15)
+  end
+  JunkyardBusy = false
+end
+StartJunkyard = function()
+  if not JunkyardEnabled or ScanQueued then return end
+  ScanQueued = true
+  task.spawn(function()
+    task.wait(0.5)
+    if JunkyardEnabled and not AutoHopEnabled and not JunkyardBusy then
+      pcall(ScanJunkyard, false)
+    end
+    ScanQueued = false
+  end)
+end
+local function RefreshSeconds()
+  local Interactions = workspace:FindFirstChild("__INTERACTIONS")
+  local Panel = Interactions and Interactions:FindFirstChild("RefreshingPanel")
+  if not Panel then return nil end
+  local Children = Panel:GetChildren()
+  local function Read(Child)
+    local Board = Child:FindFirstChild("RefreshBoard")
+    local Rim = Board and Board:FindFirstChild("Rim")
+    local Bg = Rim and Rim:FindFirstChild("Bg")
+    local Timer = Bg and Bg:FindFirstChild("Timer")
+    local Time = Timer and Timer:FindFirstChild("Time")
+    if not Time then return nil end
+    local Raw
+    if Time:IsA("TextLabel") or Time:IsA("TextButton") then
+      Raw = Time.Text
+    elseif Time:IsA("StringValue") then
+      Raw = Time.Value
+    end
+    if typeof(Raw) ~= "string" then return nil end
+    local Minutes, Seconds = Raw:match("^%s*(%d+):(%d+)%s*$")
+    if Minutes and Seconds then
+      return tonumber(Minutes) * 60 + tonumber(Seconds)
+    end
+    local Single = Raw:match("^%s*(%d+)%s*$")
+    return Single and tonumber(Single) or nil
+  end
+  if Children[7] then
+    local Result = Read(Children[7])
+    if Result then return Result end
+  end
+  for _, Child in ipairs(Children) do
+    local Result = Read(Child)
+    if Result then return Result end
+  end
+end
+local function WaitForNextRotation(Seconds)
+  local Previous = JunkyardRotation
+  local Deadline = os.clock() + Seconds + 12
+  while AutoHopEnabled and JunkyardEnabled and os.clock() < Deadline do
+    if JunkyardRotation > Previous then
+      task.wait(1)
+      return true
+    end
+    local Remaining = RefreshSeconds()
+    if Remaining and Remaining > Seconds + 5 then
+      task.wait(1)
+      return true
+    end
+    task.wait(0.2)
+  end
+  return false
+end
+local function QueueNextServer()
+  local Queue = queue_on_teleport
+    or (syn and syn.queue_on_teleport)
+    or (fluxus and fluxus.queue_on_teleport)
+  if typeof(Queue) ~= "function" then return false end
+  if WAYFINDER_RAW_URL == "YOUR_WAYFINDER_RAW_URL" then return false end
+  local HTTP = game:GetService("HttpService")
+  local TeleportService = game:GetService("TeleportService")
+  local URL = "https://games.roblox.com/v1/games/" .. game.PlaceId
+    .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
+  local OK, Data = pcall(function()
+    return HTTP:JSONDecode(game:HttpGet(URL))
+  end)
+  if not OK or typeof(Data) ~= "table" then return false end
+  local Available = {}
+  for _, Server in ipairs(Data.data or {}) do
+    if typeof(Server.id) == "string" and Server.id ~= game.JobId
+      and typeof(Server.playing) == "number"
+      and typeof(Server.maxPlayers) == "number"
+      and Server.playing < Server.maxPlayers
+      and not VisitedServers[Server.id] then
+      table.insert(Available, Server.id)
+    end
+  end
+  if #Available == 0 then return false end
+  local Target = Available[math.random(#Available)]
+  VisitedServers[game.JobId] = true
+  VisitedServers[Target] = true
+  local Loader = string.format([[
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    local Env = (getgenv and getgenv()) or _G
+    Env.__WayfinderHopResume = game:GetService("HttpService"):JSONDecode(%q)
+    loadstring(game:HttpGet(%q))()
+  ]], HTTP:JSONEncode({enabled = true, minimum = MinimumValue, visited = VisitedServers}), WAYFINDER_RAW_URL)
+  if not pcall(Queue, Loader) then return false end
+
+  local Failed = false
+  local FailureConnection = TeleportService.TeleportInitFailed:Connect(function(FailedPlayer, _, _, FailedPlaceId, Options)
+    if FailedPlayer ~= Player or FailedPlaceId ~= game.PlaceId then return end
+    if Options and Options.ServerInstanceId and Options.ServerInstanceId ~= Target then return end
+    Failed = true
+  end)
+  local Started = pcall(function()
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, Target, Player)
+  end)
+  if not Started then Failed = true end
+  local Deadline = os.clock() + 25
+  while not Failed and os.clock() < Deadline do
+    if not AutoHopEnabled or not JunkyardEnabled
+      or SnipeSucceeded or SnipeUncertain then break end
+    task.wait(0.2)
+  end
+  FailureConnection:Disconnect()
+  return false
+end
+StartAutoHop = function()
+  if AutoHopRunning or not AutoHopEnabled or not JunkyardEnabled then return end
+  AutoHopRunning = true
+  task.spawn(function()
+    pcall(function()
+      if Player:GetAttribute("OnLoadingScreen") ~= false then
+        local Gui = Player:WaitForChild("PlayerGui")
+        local Deadline = os.clock() + 45
+        while os.clock() < Deadline do
+          local Menu = Gui:FindFirstChild("MenuScreen")
+          local Container = Menu and Menu:FindFirstChild("Container")
+          local Play = Container and Container:FindFirstChild("PlayBtn")
+          if Play and Play.Visible then
+            pcall(function() FinishLoading:FireServer("Finished") end)
+            break
+          end
+          if Player:GetAttribute("OnLoadingScreen") == false then break end
+          task.wait(0.2)
+        end
+        local Final = os.clock() + 35
+        while Player:GetAttribute("OnLoadingScreen") ~= false and os.clock() < Final do
+          task.wait(0.2)
+        end
+        if Player:GetAttribute("OnLoadingScreen") ~= false then return end
+      end
+      task.wait(2)
+      while AutoHopEnabled and JunkyardEnabled
+        and not SnipeSucceeded and not SnipeUncertain do
+        while JunkyardBusy and AutoHopEnabled and JunkyardEnabled do
+          task.wait(0.2)
+        end
+        if not AutoHopEnabled or not JunkyardEnabled then break end
+        ScanJunkyard(true)
+        if SnipeSucceeded or SnipeUncertain then break end
+
+        local Remaining = RefreshSeconds()
+        if Remaining and Remaining < 20 then
+          if WaitForNextRotation(Remaining) then
+            if not AutoHopEnabled or not JunkyardEnabled then break end
+            ScanJunkyard(true)
+            if SnipeSucceeded or SnipeUncertain then break end
+          end
+        end
+        pcall(function()
+          Window:Notify({
+            title = "No Snipes",
+            content = "No snipes: Server hopping in 5 seconds",
+            icon = 110786993356448,
+            duration = 5
+          })
+        end)
+        local Deadline = os.clock() + 5
+        while os.clock() < Deadline do
+          if not AutoHopEnabled or not JunkyardEnabled then break end
+          if SnipeSucceeded or SnipeUncertain then break end
+          task.wait(0.1)
+        end
+        if not AutoHopEnabled or not JunkyardEnabled
+          or SnipeSucceeded or SnipeUncertain then break end
+        local NextRefresh = RefreshSeconds()
+        if NextRefresh and NextRefresh < 20 then
+          if WaitForNextRotation(NextRefresh) then
+            ScanJunkyard(true)
+            if SnipeSucceeded or SnipeUncertain then break end
+          end
+        end
+        if not AutoHopEnabled or not JunkyardEnabled then break end
+        QueueNextServer()
+        task.wait(5)
+      end
+    end)
+    AutoHopRunning = false
+  end)
+end
+JunkyardUpdated.OnClientEvent:Connect(function(CarList, UpdateType)
+  if UpdateType ~= "update" or typeof(CarList) ~= "table" then return end
+  ActiveCars = CarList
+  JunkyardRotation += 1
+  if JunkyardEnabled and not AutoHopEnabled then StartJunkyard() end
+end)
+task.spawn(function()
+  local Root = workspace:WaitForChild("__JUNKYARD")
+  local Folder = Root:WaitForChild("Cars")
+  Folder.ChildAdded:Connect(function(Child)
+    if Child:IsA("Model") and JunkyardEnabled and not AutoHopEnabled then
+      StartJunkyard()
+    end
+  end)
+end)
+Player:GetAttributeChangedSignal("InShopInterior"):Connect(function()
+  if Player:GetAttribute("InShopInterior") == false
+    and JunkyardEnabled and not AutoHopEnabled then
+    StartJunkyard()
+  end
+end)
+if Resume and Resume.enabled then
+  JunkyardEnabled = true
+  AutoHopEnabled = true
+  if Resume.minimum then MinimumValue = Resume.minimum end
+end
+if AutoHopEnabled and JunkyardEnabled then
+  task.defer(StartAutoHop)
+elseif JunkyardEnabled then
+  task.defer(StartJunkyard)
+end
+local MiscTab = Window:CreateTab({name = "Misc"})
+MiscTab:CreateSection({ name = "Server", icon = 88183305858463 })
+
+MiscTab:CreateButton({
+  name = "Rejoin",
+  icon = 84183336178654,
+  callback = function()
+    task.spawn(function()
+      local TeleportService = game:GetService("TeleportService")
+
+      if #Players:GetPlayers() <= 1 then
+        Player:Kick("\nRejoining...")
+        task.wait(0.3)
+        TeleportService:Teleport(game.PlaceId, Player)
+      else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, Player)
+      end
+    end)
+  end
+})
+MiscTab:CreateButton({
+  name = "Server Hop",
+  icon = 103768533135201,
+  callback = function()
+    task.spawn(function()
+      local HttpService = game:GetService("HttpService")
+      local TeleportService = game:GetService("TeleportService")
+
+      local URL = "https://games.roblox.com/v1/games/" .. game.PlaceId
+        .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
+
+      local Success, Servers = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(URL)).data
+      end)
+      if not Success or not Servers then return end
+
+      local Available = {}
+
+      for _, Server in ipairs(Servers) do
+        if Server.id ~= game.JobId
+          and Server.playing < Server.maxPlayers then
+          table.insert(Available, Server.id)
+        end
+      end
+      if #Available == 0 then return end
+
+      local Target = Available[math.random(#Available)]
+      pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, Target, Player)
+      end)
+    end)
+  end
+})
+if enabled and not running then
+  running = true
+  task.spawn(function()
+    pcall(AutoLoop)
+    running = false
+  end)
+end
