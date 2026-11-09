@@ -1,6 +1,66 @@
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+
+local rgb = Color3.fromRGB
+local gradient = ColorSequence.new
+
+local SilverTwilight = {
+    WindowColor = gradient(rgb(6, 17, 46), rgb(13, 22, 39)),
+    ShadowColor = rgb(13, 9, 31),
+    SurfaceStroke = rgb(106, 137, 182),
+    LiveAnimation = true,
+
+    CornerRoundness = UDim.new(0, 14),
+    PillCornerRadius = UDim.new(1, 0),
+    ElementCornerRadius = UDim.new(0, 9),
+
+    TitlingColor = rgb(237, 244, 252),
+    ContentColor = rgb(205, 218, 234),
+    ElementTextHoverColor = rgb(255, 255, 255),
+    ActionColor = rgb(186, 206, 231),
+    PlaceholderColor = rgb(115, 137, 167),
+
+    TabColor = rgb(229, 239, 251),
+    TabBackground = gradient(rgb(66, 92, 130), rgb(41, 61, 96)),
+    TabStroke = gradient(rgb(186, 208, 234), rgb(81, 116, 159)),
+
+    ElementGradient = gradient(rgb(34, 49, 76), rgb(22, 34, 57)),
+    ElementStroke = rgb(91, 120, 159),
+    ElementStrokeTransparency = 0.55,
+    ElementStrokeHover = rgb(180, 207, 239),
+    ElementStrokeHoverTransparency = 0.15,
+    ElementTransparency = 0.10,
+    StatBackground = rgb(27, 41, 66),
+
+    AccentColor = rgb(195, 216, 241),
+    AccentStroke = rgb(228, 239, 255),
+    AccentGlow = 0.65,
+
+    ToggleTrack = rgb(36, 54, 83),
+    ToggleTrackTransparency = 0.05,
+    ToggleKnobOff = rgb(110, 131, 158),
+
+    SliderBackground = rgb(33, 49, 77),
+    SliderBackgroundHover = rgb(48, 70, 107),
+    SliderProgress = gradient(rgb(108, 153, 211), rgb(210, 229, 250)),
+    SliderStroke = rgb(103, 135, 181),
+    SliderHandle = rgb(240, 247, 255),
+
+    DropdownHighlight = rgb(62, 91, 132),
+
+    FieldBackground = rgb(19, 31, 53),
+    FieldTransparency = 0.08,
+    FieldGlow = rgb(93, 143, 211),
+
+    NeutralButton = rgb(48, 67, 99),
+    NeutralButtonHover = rgb(73, 99, 140),
+    NeutralButtonStroke = rgb(127, 159, 202),
+
+    ErrorColor = rgb(189, 82, 111),
+    ErrorStrokeColor = rgb(241, 145, 166)
+}
+
 local Window = Rayfield:CreateWindow({
-  name = "Wayfinder", subtitle = "Always Forward.",
+  name = "Wayfinder", subtitle = "Always Forward.", theme = SilverTwilight,
   icon = 138009255210416, showName = "Wayfinder", showIcon = 138009255210416,
   configuration = {autoSave = true, autoLoad = true, fileName = "WayFinder"}
 })
@@ -10,7 +70,24 @@ local Resume = Session.__WayfinderHopResume
 Session.__WayfinderHopResume = nil
 local JunkyardEnabled = Resume ~= nil and Resume.enabled == true
 local AutoHopEnabled = JunkyardEnabled
-local MinimumValue = Resume and Resume.minimum or 50000
+local SelectedVehicles = Resume and typeof(Resume.targets) == "table" and table.clone(Resume.targets) or {}
+local TargetSet = {}
+local function UpdateTargets(Value)
+  SelectedVehicles = {}
+  TargetSet = {}
+  if typeof(Value) == "string" then Value = {Value} end
+  if typeof(Value) ~= "table" then return end
+  for _, Name in ipairs(Value) do
+    if typeof(Name) == "string" and Name ~= "Any Vehicle" and not TargetSet[Name] then
+      TargetSet[Name] = true
+      table.insert(SelectedVehicles, Name)
+    end
+  end
+end
+UpdateTargets(SelectedVehicles)
+local function MatchesTarget(Name)
+  return typeof(Name) == "string" and TargetSet[Name] == true
+end
 local StartJunkyard, StartAutoHop
 local CustomerJobsToggle, JunkyardToggle, AutoHopToggle
 local JunkyardBusy = false
@@ -64,11 +141,45 @@ JunkyardToggle = AutoFarmTab:CreateToggle({
     end
   end
 })
-AutoFarmTab:CreateSlider({
-  name = "Minimum Buy Value", range = {0, 500000}, increment = 5000,
-  value = MinimumValue, suffix = "$",
-  callback = function(Value) MinimumValue = Value end
+local VehicleDropdown = AutoFarmTab:CreateDropdown({
+  name = "Target Vehicles", flag = "JunkyardTargetVehicles",
+  multiSelect = true, options = {}, value = SelectedVehicles,
+  placeholder = "Select vehicles",
+  callback = function(Value)
+    UpdateTargets(Value)
+    if JunkyardEnabled then
+      if AutoHopEnabled and StartAutoHop and #SelectedVehicles > 0 then
+        task.spawn(StartAutoHop)
+      elseif not AutoHopEnabled and StartJunkyard then
+        task.spawn(StartJunkyard)
+      end
+    end
+  end
 })
+task.spawn(function()
+  local ReplicatedStorage = game:GetService("ReplicatedStorage")
+  local Directory = ReplicatedStorage:WaitForChild("__DIRECTORY", 15)
+  local Vehicles = Directory and Directory:WaitForChild("Vehicles", 10)
+  if not Vehicles then return end
+  local SpawnsFolder = Directory:FindFirstChild("JunkyardSpawns")
+  local SpawnsModule = SpawnsFolder and SpawnsFolder:FindFirstChild("JunkyardSpawns")
+  local OK, Spawns = pcall(function()
+    return SpawnsModule and require(SpawnsModule)
+  end)
+  local Options = {}
+  local Names = {}
+  for _, Vehicle in ipairs(Vehicles:GetChildren()) do
+    if Vehicle:IsA("ModuleScript") and Vehicle.Name ~= "RepoReaper"
+      and (not OK or typeof(Spawns) ~= "table"
+        or (typeof(Spawns[Vehicle.Name]) == "table" and Spawns[Vehicle.Name].IsDisabled ~= true)) then
+      table.insert(Names, Vehicle.Name)
+    end
+  end
+  table.sort(Names)
+  for _, Name in ipairs(Names) do table.insert(Options, Name) end
+  VehicleDropdown:Refresh(Options)
+  VehicleDropdown:Set(SelectedVehicles)
+end)
 AutoHopToggle = AutoFarmTab:CreateToggle({
   name = "Auto Serverhop until snipe",
   flag = "AutoServerhopUntilSnipe", default = AutoHopEnabled,
@@ -121,13 +232,30 @@ local Cancel = F.CancelCustomerJob
 local Repair = E.RepairPart
 local WithdrawPart = F:WaitForChild("WithdrawPart")
 
-local EngineIds = {
-  WRXRS = "inline-4",
-  CivicSI = "inline-4",
-  ["350z"] = "inline-6",
-  E92M3 = "v8",
-  NAMiata = "inline-4"
-}
+local EngineIds = setmetatable({}, {
+  __index = function(Cache, CarName)
+    local Directory = RS:FindFirstChild("__DIRECTORY")
+    local Vehicles = Directory and Directory:FindFirstChild("Vehicles")
+    local Engines = Directory and Directory:FindFirstChild("Engines")
+    local Vehicle = Vehicles and Vehicles:FindFirstChild(CarName)
+    if not Vehicle or not Vehicle:IsA("ModuleScript") or not Engines then return nil end
+    local OK, Entry = pcall(require, Vehicle)
+    if not OK or typeof(Entry) ~= "table" then return nil end
+    local Info = Entry
+    for _, Key in ipairs({"Data", "Config", "Properties"}) do
+      if typeof(Entry[Key]) == "table" and typeof(Entry[Key].DefaultEngineId) == "string" then
+        Info = Entry[Key]
+        break
+      end
+    end
+    local EngineId = Info.DefaultEngineId
+    if typeof(EngineId) ~= "string" or not Engines:FindFirstChild(EngineId) then return nil end
+    local Prefix = EngineId:match("(inline%-%d+)$")
+      or EngineId:match("(flat%-%d+)$") or EngineId:match("(v%d+)$")
+    if Prefix then rawset(Cache, CarName, Prefix) end
+    return Prefix
+  end
+})
 local StoreParts = {
   Wiring = "wiring", Intercooler = "intercooler",
   IntakeManifold = "intake-manifold", ExhaustManifold = "exhaust-manifold",
@@ -1230,7 +1358,7 @@ local function EligibleCars()
   local Result, Seen = {}, {}
   local function Add(Id, Price, Model, Name)
     if typeof(Id) ~= "string" or Id == "" then return end
-    if typeof(Price) ~= "number" or Price < MinimumValue then return end
+    if typeof(Price) ~= "number" or Price < 0 or not MatchesTarget(Name) then return end
     if Scanned[Id] or Seen[Id] then return end
     Seen[Id] = true
     table.insert(Result, {Id = Id, Price = Price, Model = Model, Name = Name})
@@ -1239,13 +1367,21 @@ local function EligibleCars()
     if typeof(Car) == "table" then Add(Car.Uuid, Car.Price, nil, Car.DirId) end
   end
   if Player:GetAttribute("InShopInterior") == false then
+    local EventNames = {}
+    for _, Car in ipairs(ActiveCars) do
+      if typeof(Car) == "table" and typeof(Car.Uuid) == "string" then
+        EventNames[Car.Uuid] = Car.DirId
+      end
+    end
     local Folder = GetJunkyardCars()
     if Folder then
       for _, Model in ipairs(Folder:GetChildren()) do
         local Info = Model:FindFirstChild("__REFLECT")
         if Info then
-          local CarName = Model.Name:gsub("^Junkyard_", "")
-          Add(Info:GetAttribute("Uuid"), Info:GetAttribute("Price"), Model, CarName)
+          local UUID = Info:GetAttribute("Uuid")
+          local CarName = EventNames[UUID] or Info:GetAttribute("DirId")
+            or Model.Name:gsub("^Junkyard_", "")
+          Add(UUID, Info:GetAttribute("Price"), Model, CarName)
         end
       end
     end
@@ -1417,7 +1553,7 @@ local function QueueNextServer()
     local Env = (getgenv and getgenv()) or _G
     Env.__WayfinderHopResume = game:GetService("HttpService"):JSONDecode(%q)
     loadstring(game:HttpGet(%q))()
-  ]], HTTP:JSONEncode({enabled = true, minimum = MinimumValue, visited = VisitedServers}), WAYFINDER_RAW_URL)
+  ]], HTTP:JSONEncode({enabled = true, targets = SelectedVehicles, visited = VisitedServers}), WAYFINDER_RAW_URL)
   if not pcall(Queue, Loader) then return false end
 
   local Failed = false
@@ -1441,6 +1577,12 @@ local function QueueNextServer()
 end
 StartAutoHop = function()
   if AutoHopRunning or not AutoHopEnabled or not JunkyardEnabled then return end
+  if #SelectedVehicles == 0 then
+    pcall(function()
+      Window:Notify({title = "No targets selected", content = "Choose a vehicle before auto serverhopping.", duration = 5})
+    end)
+    return
+  end
   AutoHopRunning = true
   task.spawn(function()
     pcall(function()
@@ -1465,7 +1607,7 @@ StartAutoHop = function()
         if Player:GetAttribute("OnLoadingScreen") ~= false then return end
       end
       task.wait(2)
-      while AutoHopEnabled and JunkyardEnabled
+      while AutoHopEnabled and JunkyardEnabled and #SelectedVehicles > 0
         and not SnipeSucceeded and not SnipeUncertain do
         while JunkyardBusy and AutoHopEnabled and JunkyardEnabled do
           task.wait(0.2)
@@ -1485,7 +1627,7 @@ StartAutoHop = function()
         pcall(function()
           Window:Notify({
             title = "No Snipes",
-            content = "No snipes: Server hopping in 5 seconds",
+            content = "Server hopping in 5 seconds",
             icon = 110786993356448,
             duration = 5
           })
@@ -1505,7 +1647,7 @@ StartAutoHop = function()
             if SnipeSucceeded or SnipeUncertain then break end
           end
         end
-        if not AutoHopEnabled or not JunkyardEnabled then break end
+        if not AutoHopEnabled or not JunkyardEnabled or #SelectedVehicles == 0 then break end
         QueueNextServer()
         task.wait(5)
       end
@@ -1537,7 +1679,6 @@ end)
 if Resume and Resume.enabled then
   JunkyardEnabled = true
   AutoHopEnabled = true
-  if Resume.minimum then MinimumValue = Resume.minimum end
 end
 if AutoHopEnabled and JunkyardEnabled then
   task.defer(StartAutoHop)
