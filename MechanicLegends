@@ -119,8 +119,8 @@ local enabled, running = false, false
 local AutoLoop
 local SetProgress
 local currentStep = 0
-local AutoFarmTab = Window:CreateTab({name = "AutoFarm"})
-AutoFarmTab:CreateSection({ name = "Automation", icon = 112148279212860 })
+local AutoFarmTab = Window:CreateTab({name = "AutoFarm", icon = 138133190015277})
+AutoFarmTab:CreateSection({ name = "Jobs", icon = 132331555762628 })
 CustomerJobsToggle = AutoFarmTab:CreateToggle({
   name = "Customer Jobs", flag = "AutoCustomerJobs", value = false,
   callback = function(On)
@@ -152,6 +152,7 @@ SetProgress = function(Step, Status)
   Progress:Set(currentStep)
   Progress:SetText(Status)
 end
+AutoFarmTab:CreateSection({ name = "Junkyard", icon = 112148279212860 })
 JunkyardToggle = AutoFarmTab:CreateToggle({
   name = "Junkyard Car Sniper",
   flag = "JunkyardCarSniper", value = JunkyardEnabled,
@@ -1726,7 +1727,7 @@ elseif JunkyardEnabled then
   task.defer(StartJunkyard)
 end
 
-local MiscTab = Window:CreateTab({name = "Misc"})
+local MiscTab = Window:CreateTab({name = "Misc", icon = 112384738137814})
 MiscTab:CreateSection({ name = "Server", icon = 92188766517878 })
 MiscTab:CreateText({
     name = "Anti-Afk",
