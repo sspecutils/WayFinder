@@ -147,7 +147,6 @@ JunkyardToggle = AutoFarmTab:CreateToggle({
 })
 local VehicleDropdown = AutoFarmTab:CreateDropdown({
   name = "Target Vehicles", flag = "JunkyardTargetVehicles",
-  description = "Select one or more cars to snipe.",
   multiSelect = true, options = {}, value = SelectedVehicles,
   placeholder = "Select vehicles",
   callback = function(Value)
@@ -1639,7 +1638,7 @@ StartAutoHop = function()
         pcall(function()
           Window:Notify({
             title = "No Snipes",
-            content = "No snipes: Server hopping in 5 seconds",
+            content = "Server hopping in 5 seconds",
             icon = 110786993356448,
             duration = 5
           })
