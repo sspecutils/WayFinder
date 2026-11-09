@@ -69,11 +69,29 @@ local Window = Rayfield:CreateWindow({
   configuration = {autoSave = false, autoLoad = false, fileName = "WayFinder"}
 })
 local WAYFINDER_RAW_URL = "https://raw.githubusercontent.com/sspecutils/WayFinder/refs/heads/main/MechanicLegends"
+local HTTP = game:GetService("HttpService")
+local AutoLoadFile = "Rayfield/Configurations/WayFinder.autoload.json"
+local FileAccess = typeof(readfile) == "function" and typeof(writefile) == "function"
+local function ReadAutoLoad()
+  if not FileAccess then return nil end
+  local OK, Value = pcall(function()
+    local Data = HTTP:JSONDecode(readfile(AutoLoadFile))
+    return typeof(Data) == "table" and Data.name or nil
+  end)
+  return OK and typeof(Value) == "string" and Value ~= "" and Value or nil
+end
+local AutoLoadName = ReadAutoLoad()
+local function HasAutoLoadConfig()
+  if not AutoLoadName or not FileAccess then return false end
+  local OK, Names = pcall(function() return Window:ListConfigs() end)
+  return OK and typeof(Names) == "table" and table.find(Names, AutoLoadName) ~= nil
+end
 local Session = (getgenv and getgenv()) or _G
 local Resume = Session.__WayfinderHopResume
 Session.__WayfinderHopResume = nil
 local JunkyardEnabled = Resume ~= nil and Resume.enabled == true
 local AutoHopEnabled = JunkyardEnabled
+if AutoHopEnabled and not HasAutoLoadConfig() then AutoHopEnabled = false end
 local SelectedVehicles = Resume and typeof(Resume.targets) == "table" and table.clone(Resume.targets) or {}
 local TargetSet = {}
 local function UpdateTargets(Value)
@@ -187,8 +205,17 @@ task.spawn(function()
 end)
 AutoHopToggle = AutoFarmTab:CreateToggle({
   name = "Auto Serverhop until snipe",
+  description = "Requires an auto-load configuration in Settings. Save Current As Auto Load before enabling.",
   flag = "AutoServerhopUntilSnipe", value = AutoHopEnabled,
   callback = function(Value)
+    if Value == true and not HasAutoLoadConfig() then
+      AutoHopEnabled = false
+      task.defer(function()
+        if AutoHopToggle then AutoHopToggle:Set(false, true) end
+      end)
+      Window:Notify({title = "Auto-load config required", content = "Go to Settings and use Save Current As Auto Load before serverhopping.", duration = 5})
+      return
+    end
     AutoHopEnabled = Value == true
     if AutoHopEnabled and enabled then
       enabled = false
@@ -1511,7 +1538,7 @@ end
 local function WaitForNextRotation(Seconds)
   local Previous = JunkyardRotation
   local Deadline = os.clock() + Seconds + 12
-  while AutoHopEnabled and JunkyardEnabled and os.clock() < Deadline do
+  while AutoHopEnabled and JunkyardEnabled and AutoLoadName ~= nil and os.clock() < Deadline do
     if JunkyardRotation > Previous then
       task.wait(1)
       return true
@@ -1589,6 +1616,11 @@ local function QueueNextServer()
 end
 StartAutoHop = function()
   if AutoHopRunning or not AutoHopEnabled or not JunkyardEnabled then return end
+  if not HasAutoLoadConfig() then
+    AutoHopEnabled = false
+    if AutoHopToggle then AutoHopToggle:Set(false, true) end
+    return
+  end
   if #SelectedVehicles == 0 then
     pcall(function()
       Window:Notify({title = "No targets selected", content = "Choose a vehicle before auto serverhopping.", duration = 5})
@@ -1619,7 +1651,7 @@ StartAutoHop = function()
         if Player:GetAttribute("OnLoadingScreen") ~= false then return end
       end
       task.wait(2)
-      while AutoHopEnabled and JunkyardEnabled and #SelectedVehicles > 0
+      while AutoHopEnabled and JunkyardEnabled and AutoLoadName ~= nil and #SelectedVehicles > 0
         and not SnipeSucceeded and not SnipeUncertain do
         while JunkyardBusy and AutoHopEnabled and JunkyardEnabled do
           task.wait(0.2)
@@ -1761,20 +1793,7 @@ end
 local SettingsTab = Window:CreateTab({name = "Settings", icon = 80758916183665})
 SettingsTab:CreateSection({name = "Configurations", icon = 126116963775616})
 
-local HTTP = game:GetService("HttpService")
-local AutoLoadFile = "Rayfield/Configurations/WayFinder.autoload.json"
 local SelectedConfig
-local AutoLoadName
-local FileAccess = typeof(readfile) == "function" and typeof(writefile) == "function"
-
-local function ReadAutoLoad()
-  if not FileAccess then return nil end
-  local OK, Value = pcall(function()
-    local Data = HTTP:JSONDecode(readfile(AutoLoadFile))
-    return typeof(Data) == "table" and Data.name or nil
-  end)
-  return OK and typeof(Value) == "string" and Value ~= "" and Value or nil
-end
 
 local function WriteAutoLoad(Name)
   if not FileAccess then return false end
@@ -1787,7 +1806,6 @@ local function WriteAutoLoad(Name)
   end)
 end
 
-AutoLoadName = ReadAutoLoad()
 local AutoLoadStatus = SettingsTab:CreateText({
   name = "Current Auto-Load Config",
   text = not FileAccess and "Unavailable (file access required)"
@@ -1841,16 +1859,6 @@ SettingsTab:CreateButton({name = "Load Config", icon = 76018996254888, callback 
     ConfigNotice("Load failed", SelectedConfig)
   end
 end})
-SettingsTab:CreateButton({name = "Set As Auto Load", icon = 85262178816537, callback = function()
-  if not SelectedConfig then return ConfigNotice("Config", "Select a saved configuration") end
-  if WriteAutoLoad(SelectedConfig) then
-    AutoLoadName = SelectedConfig
-    UpdateAutoLoadStatus()
-    ConfigNotice("Auto load set", SelectedConfig .. " will load on startup")
-  else
-    ConfigNotice("Auto load failed", "Executor file access required")
-  end
-end})
 SettingsTab:CreateButton({name = "Save Current As Auto Load", icon = 138133190015277, callback = function()
   local Name = SelectedConfig or "WayFinder Auto"
   if not FileAccess then return ConfigNotice("Save failed", "Executor file access required") end
@@ -1863,6 +1871,10 @@ end})
 SettingsTab:CreateButton({name = "Clear Auto Load", icon = 87085435778560, callback = function()
   if WriteAutoLoad(nil) then
     AutoLoadName = nil
+    if AutoHopEnabled then
+      AutoHopEnabled = false
+      if AutoHopToggle then AutoHopToggle:Set(false, true) end
+    end
     UpdateAutoLoadStatus()
     ConfigNotice("Auto load cleared", "No config will auto-load")
   else
@@ -1874,7 +1886,7 @@ SettingsTab:CreateButton({name = "Refresh Config List", icon = 117913330389477, 
 end})
 RefreshConfigList()
 
-if Resume and Resume.enabled then
+if Resume and Resume.enabled and HasAutoLoadConfig() then
   task.defer(function()
     if not SnipeSucceeded then
       if CustomerJobsToggle then CustomerJobsToggle:Set(false) end
