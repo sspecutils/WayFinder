@@ -66,7 +66,7 @@ local SilverTwilight = {
 local Window = Rayfield:CreateWindow({
   name = "Wayfinder", subtitle = "Always Forward.", theme = SilverTwilight,
   icon = 138009255210416, showName = "Wayfinder", showIcon = 138009255210416,
-  configuration = {autoSave = true, autoLoad = true, fileName = "WayFinder"}
+  configuration = {autoSave = false, autoLoad = false, fileName = "WayFinder"}
 })
 local WAYFINDER_RAW_URL = "https://raw.githubusercontent.com/sspecutils/WayFinder/refs/heads/main/MechanicLegends"
 local Session = (getgenv and getgenv()) or _G
@@ -1709,6 +1709,71 @@ if AutoHopEnabled and JunkyardEnabled then
 elseif JunkyardEnabled then
   task.defer(StartJunkyard)
 end
+
+local MiscTab = Window:CreateTab({name = "Misc"})
+MiscTab:CreateSection({ name = "Server", icon = 88183305858463 })
+MiscTab:CreateText({
+    name = "Anti-Afk",
+    text = "Either half can be left out, and the card closes up around what is left.",
+    icon = 81775205032725,
+})
+MiscTab:CreateButton({
+  name = "Rejoin",
+  icon = 84183336178654,
+  callback = function()
+    task.spawn(function()
+      local TeleportService = game:GetService("TeleportService")
+
+      if #Players:GetPlayers() <= 1 then
+        Player:Kick("\nRejoining...")
+        task.wait(0.3)
+        TeleportService:Teleport(game.PlaceId, Player)
+      else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, Player)
+      end
+    end)
+  end
+})
+MiscTab:CreateButton({
+  name = "Server Hop",
+  icon = 103768533135201,
+  callback = function()
+    task.spawn(function()
+      local HttpService = game:GetService("HttpService")
+      local TeleportService = game:GetService("TeleportService")
+
+      local URL = "https://games.roblox.com/v1/games/" .. game.PlaceId
+        .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
+
+      local Success, Servers = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(URL)).data
+      end)
+      if not Success or not Servers then return end
+
+      local Available = {}
+
+      for _, Server in ipairs(Servers) do
+        if Server.id ~= game.JobId
+          and Server.playing < Server.maxPlayers then
+          table.insert(Available, Server.id)
+        end
+      end
+      if #Available == 0 then return end
+
+      local Target = Available[math.random(#Available)]
+      pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, Target, Player)
+      end)
+    end)
+  end
+})
+if enabled and not running then
+  running = true
+  task.spawn(function()
+    pcall(AutoLoop)
+    running = false
+  end)
+end
 local SettingsTab = Window:CreateTab({name = "Settings", icon = "settings"})
 SettingsTab:CreateSection({name = "Configurations", icon = "save"})
 local SelectedConfig
@@ -1770,64 +1835,3 @@ SettingsTab:CreateButton({name = "Refresh Config List", icon = "refresh-ccw", ca
   RefreshConfigList()
 end})
 RefreshConfigList()
-
-local MiscTab = Window:CreateTab({name = "Misc"})
-MiscTab:CreateSection({ name = "Server", icon = 88183305858463 })
-
-MiscTab:CreateButton({
-  name = "Rejoin",
-  icon = 84183336178654,
-  callback = function()
-    task.spawn(function()
-      local TeleportService = game:GetService("TeleportService")
-
-      if #Players:GetPlayers() <= 1 then
-        Player:Kick("\nRejoining...")
-        task.wait(0.3)
-        TeleportService:Teleport(game.PlaceId, Player)
-      else
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, Player)
-      end
-    end)
-  end
-})
-MiscTab:CreateButton({
-  name = "Server Hop",
-  icon = 103768533135201,
-  callback = function()
-    task.spawn(function()
-      local HttpService = game:GetService("HttpService")
-      local TeleportService = game:GetService("TeleportService")
-
-      local URL = "https://games.roblox.com/v1/games/" .. game.PlaceId
-        .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
-
-      local Success, Servers = pcall(function()
-        return HttpService:JSONDecode(game:HttpGet(URL)).data
-      end)
-      if not Success or not Servers then return end
-
-      local Available = {}
-
-      for _, Server in ipairs(Servers) do
-        if Server.id ~= game.JobId
-          and Server.playing < Server.maxPlayers then
-          table.insert(Available, Server.id)
-        end
-      end
-      if #Available == 0 then return end
-
-      local Target = Available[math.random(#Available)]
-      pcall(function()
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, Target, Player)
-      end)
-    end)
-  end
-})
-if enabled and not running then
-  running = true
-  task.spawn(function()
-    pcall(AutoLoop)
-    running = false
-  end)
-end
