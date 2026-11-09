@@ -265,11 +265,17 @@ local Cancel = F.CancelCustomerJob
 local Repair = E.RepairPart
 local WithdrawPart = F:WaitForChild("WithdrawPart")
 
+local EngineDirectory = RS:FindFirstChild("__DIRECTORY")
+local VehicleDirectory = EngineDirectory and EngineDirectory:FindFirstChild("Vehicles")
+local EngineDefinitions = EngineDirectory and EngineDirectory:FindFirstChild("Engines")
 local EngineIds = setmetatable({}, {
   __index = function(Cache, CarName)
-    local Directory = RS:FindFirstChild("__DIRECTORY")
-    local Vehicles = Directory and Directory:FindFirstChild("Vehicles")
-    local Engines = Directory and Directory:FindFirstChild("Engines")
+    if not VehicleDirectory or not EngineDefinitions then
+      EngineDirectory = RS:FindFirstChild("__DIRECTORY")
+      VehicleDirectory = EngineDirectory and EngineDirectory:FindFirstChild("Vehicles")
+      EngineDefinitions = EngineDirectory and EngineDirectory:FindFirstChild("Engines")
+    end
+    local Vehicles, Engines = VehicleDirectory, EngineDefinitions
     local Vehicle = Vehicles and Vehicles:FindFirstChild(CarName)
     if not Vehicle or not Vehicle:IsA("ModuleScript") or not Engines then return nil end
     local OK, Entry = pcall(require, Vehicle)
@@ -1383,7 +1389,7 @@ local ExitWorkshop = E:WaitForChild("RequestExitPlayerShop")
 local EnterWorkshop = F:WaitForChild("ShopVisitEnterOwn")
 local JunkyardUpdated = E:WaitForChild("JunkyardUpdated")
 local FinishLoading = E:WaitForChild("LoadingScreenFinished")
-local ActiveCars, Scanned = {}, {}
+local ActiveCars, Scanned, EventNames = {}, {}, {}
 local AutoHopRunning, ScanQueued = false, false
 local JunkyardRotation = 0
 
@@ -1400,12 +1406,6 @@ local function EligibleCars()
     if typeof(Car) == "table" then Add(Car.Uuid, Car.Price, nil, Car.DirId) end
   end
   if Player:GetAttribute("InShopInterior") == false then
-    local EventNames = {}
-    for _, Car in ipairs(ActiveCars) do
-      if typeof(Car) == "table" and typeof(Car.Uuid) == "string" then
-        EventNames[Car.Uuid] = Car.DirId
-      end
-    end
     local Folder = GetJunkyardCars()
     if Folder then
       for _, Model in ipairs(Folder:GetChildren()) do
@@ -1703,6 +1703,12 @@ end
 JunkyardUpdated.OnClientEvent:Connect(function(CarList, UpdateType)
   if UpdateType ~= "update" or typeof(CarList) ~= "table" then return end
   ActiveCars = CarList
+  table.clear(EventNames)
+  for _, Car in ipairs(CarList) do
+    if typeof(Car) == "table" and typeof(Car.Uuid) == "string" then
+      EventNames[Car.Uuid] = Car.DirId
+    end
+  end
   JunkyardRotation += 1
   if JunkyardEnabled and not AutoHopEnabled then StartJunkyard() end
 end)
@@ -1834,7 +1840,7 @@ local function RefreshConfigList(Name)
   local Names = Window:ListConfigs()
   ConfigList:Refresh(Names)
   SelectedConfig = Name or (table.find(Names, SelectedConfig) and SelectedConfig) or Names[1]
-  if SelectedConfig then ConfigList:Set(SelectedConfig) end
+  if SelectedConfig then ConfigList:Set(SelectedConfig, true) end
   UpdateAutoLoadStatus()
 end
 local function ConfigNotice(Title, Content)
@@ -1868,6 +1874,41 @@ SettingsTab:CreateButton({name = "Save Current As Auto Load", icon = 13813319001
   AutoLoadName = Name
   RefreshConfigList(Name)
   ConfigNotice("Auto load updated", Name)
+end})
+SettingsTab:CreateButton({name = "Delete Config", icon = 87085435778560, description = "Permanently delete the selected saved configuration.", callback = function()
+  local Name = SelectedConfig
+  if not Name or not table.find(Window:ListConfigs(), Name) then
+    return ConfigNotice("Config", "Select a saved configuration to delete")
+  end
+  Window:Popup({
+    title = "Delete configuration?",
+    content = 'Permanently delete "' .. Name .. '"? This cannot be undone.',
+    icon = 87085435778560,
+    options = {
+      {text = "Cancel"},
+      {text = "Delete", style = "danger", callback = function()
+        local AutoConfig = AutoLoadName == Name
+        if AutoConfig and not WriteAutoLoad(nil) then
+          return ConfigNotice("Delete failed", "Unable to clear auto-load preference")
+        end
+        local OK, Deleted = pcall(function() return Window:DeleteConfig(Name) end)
+        if not OK or not Deleted then
+          if AutoConfig then WriteAutoLoad(Name) end
+          return ConfigNotice("Delete failed", "Unable to delete " .. Name)
+        end
+        if AutoConfig then
+          AutoLoadName = nil
+          if AutoHopEnabled then
+            AutoHopEnabled = false
+            if AutoHopToggle then AutoHopToggle:Set(false, true) end
+          end
+        end
+        SelectedConfig = nil
+        RefreshConfigList()
+        ConfigNotice("Config deleted", Name)
+      end}
+    }
+  })
 end})
 SettingsTab:CreateButton({name = "Clear Auto Load", icon = 87085435778560, callback = function()
   if WriteAutoLoad(nil) then
