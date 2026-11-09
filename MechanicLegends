@@ -104,7 +104,7 @@ local currentStep = 0
 local AutoFarmTab = Window:CreateTab({name = "AutoFarm"})
 AutoFarmTab:CreateSection({ name = "Automation", icon = 116544501716299 })
 CustomerJobsToggle = AutoFarmTab:CreateToggle({
-  name = "Customer Jobs", flag = "AutoCustomerJobs", default = false,
+  name = "Customer Jobs", flag = "AutoCustomerJobs", value = false,
   callback = function(On)
     enabled = On == true
     if enabled and AutoHopEnabled then
@@ -136,7 +136,7 @@ SetProgress = function(Step, Status)
 end
 JunkyardToggle = AutoFarmTab:CreateToggle({
   name = "Junkyard Car Sniper",
-  flag = "JunkyardCarSniper", default = JunkyardEnabled,
+  flag = "JunkyardCarSniper", value = JunkyardEnabled,
   callback = function(Value)
     JunkyardEnabled = Value == true
     if JunkyardEnabled then
@@ -181,12 +181,17 @@ task.spawn(function()
   end
   table.sort(Names)
   for _, Name in ipairs(Names) do table.insert(Options, Name) end
+  local Deadline = os.clock() + 15
+  while not Window._autoLoaded and os.clock() < Deadline do task.wait(0.1) end
+  local Saved = Window._loadedConfig and Window._loadedConfig.JunkyardTargetVehicles
+  local Current = (Resume and Resume.enabled) and SelectedVehicles
+    or (typeof(Saved) == "table" and Saved) or VehicleDropdown.value
   VehicleDropdown:Refresh(Options)
-  VehicleDropdown:Set(SelectedVehicles)
+  if typeof(Current) == "table" and #Current > 0 then VehicleDropdown:Set(Current) end
 end)
 AutoHopToggle = AutoFarmTab:CreateToggle({
   name = "Auto Serverhop until snipe",
-  flag = "AutoServerhopUntilSnipe", default = AutoHopEnabled,
+  flag = "AutoServerhopUntilSnipe", value = AutoHopEnabled,
   callback = function(Value)
     AutoHopEnabled = Value == true
     if AutoHopEnabled and enabled then
@@ -1688,14 +1693,84 @@ Player:GetAttributeChangedSignal("InShopInterior"):Connect(function()
   end
 end)
 if Resume and Resume.enabled then
-  JunkyardEnabled = true
-  AutoHopEnabled = true
+  task.spawn(function()
+    local Deadline = os.clock() + 15
+    while not Window._autoLoaded and os.clock() < Deadline do task.wait(0.1) end
+    if Window._autoLoaded and not SnipeSucceeded then
+      if CustomerJobsToggle then CustomerJobsToggle:Set(false) end
+      if VehicleDropdown and #SelectedVehicles > 0 then VehicleDropdown:Set(SelectedVehicles) end
+      if JunkyardToggle then JunkyardToggle:Set(true) end
+      if AutoHopToggle then AutoHopToggle:Set(true) end
+    end
+  end)
 end
 if AutoHopEnabled and JunkyardEnabled then
   task.defer(StartAutoHop)
 elseif JunkyardEnabled then
   task.defer(StartJunkyard)
 end
+local SettingsTab = Window:CreateTab({name = "Settings", icon = "settings"})
+SettingsTab:CreateSection({name = "Configurations", icon = "save"})
+local SelectedConfig
+local ConfigList = SettingsTab:CreateDropdown({
+  name = "Saved Configurations", options = Window:ListConfigs(),
+  placeholder = "Choose a config", forgetState = true,
+  callback = function(Value) SelectedConfig = Value end
+})
+local ConfigName = SettingsTab:CreateInput({
+  name = "Configuration Name", placeholder = "New config name",
+  clearOnFocus = false, forgetState = true
+})
+local function RefreshConfigList(Name)
+  local Names = Window:ListConfigs()
+  ConfigList:Refresh(Names)
+  SelectedConfig = Name or (table.find(Names, SelectedConfig) and SelectedConfig) or Names[1]
+  if SelectedConfig then ConfigList:Set(SelectedConfig) end
+end
+local function ConfigNotice(Title, Content)
+  Window:Notify({title = Title, content = Content, duration = 4})
+end
+SettingsTab:CreateButton({name = "Save Config", icon = "save", callback = function()
+  local Name = ConfigName.value
+  if typeof(Name) ~= "string" or Name:match("^%s*$") then Name = SelectedConfig end
+  if not Name or Name == "" then
+    ConfigNotice("Config", "Enter or select a configuration name")
+  elseif Window:Save(Name) then
+    RefreshConfigList(Name)
+    ConfigNotice("Config saved", Name)
+  else
+    ConfigNotice("Save failed", "Check executor file access")
+  end
+end})
+SettingsTab:CreateButton({name = "Load Config", icon = "folder-open", callback = function()
+  if not SelectedConfig then return ConfigNotice("Config", "Select a saved configuration") end
+  if Window:Load(SelectedConfig) then
+    ConfigNotice("Config loaded", SelectedConfig)
+  else
+    ConfigNotice("Load failed", SelectedConfig)
+  end
+end})
+SettingsTab:CreateButton({name = "Set As Auto Load", icon = "check-circle", callback = function()
+  if not SelectedConfig then return ConfigNotice("Config", "Select a saved configuration") end
+  if Window:_applyNamedConfig(SelectedConfig) then
+    Window.configuration.autoLoad = true
+    ConfigNotice("Auto load set", SelectedConfig .. " will load on startup")
+  else
+    ConfigNotice("Auto load failed", SelectedConfig)
+  end
+end})
+SettingsTab:CreateButton({name = "Save Current As Auto Load", icon = "refresh-cw", callback = function()
+  if Window:Save() then
+    ConfigNotice("Auto load updated", "Current settings saved as startup defaults")
+  else
+    ConfigNotice("Save failed", "Check executor file access")
+  end
+end})
+SettingsTab:CreateButton({name = "Refresh Config List", icon = "refresh-ccw", callback = function()
+  RefreshConfigList()
+end})
+RefreshConfigList()
+
 local MiscTab = Window:CreateTab({name = "Misc"})
 MiscTab:CreateSection({ name = "Server", icon = 88183305858463 })
 
