@@ -1,3 +1,7 @@
+local StartupSession = (getgenv and getgenv()) or _G
+if StartupSession.__WayfinderActiveServer == game.JobId then return end
+StartupSession.__WayfinderActiveServer = game.JobId
+
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 
 local rgb = Color3.fromRGB
@@ -143,6 +147,7 @@ JunkyardToggle = AutoFarmTab:CreateToggle({
 })
 local VehicleDropdown = AutoFarmTab:CreateDropdown({
   name = "Target Vehicles", flag = "JunkyardTargetVehicles",
+  description = "Select one or more cars to snipe.",
   multiSelect = true, options = {}, value = SelectedVehicles,
   placeholder = "Select vehicles",
   callback = function(Value)
@@ -1548,13 +1553,20 @@ local function QueueNextServer()
   local Target = Available[math.random(#Available)]
   VisitedServers[game.JobId] = true
   VisitedServers[Target] = true
-  local Loader = string.format([[
-    if not game:IsLoaded() then game.Loaded:Wait() end
-    local Env = (getgenv and getgenv()) or _G
-    Env.__WayfinderHopResume = game:GetService("HttpService"):JSONDecode(%q)
-    loadstring(game:HttpGet(%q))()
-  ]], HTTP:JSONEncode({enabled = true, targets = SelectedVehicles, visited = VisitedServers}), WAYFINDER_RAW_URL)
-  if not pcall(Queue, Loader) then return false end
+  if Session.__WayfinderQueuedServer ~= game.JobId then
+    local Loader = string.format([[
+      if not game:IsLoaded() then game.Loaded:Wait() end
+      local Env = (getgenv and getgenv()) or _G
+      if Env.__WayfinderLoaderServer == game.JobId
+        or Env.__WayfinderActiveServer == game.JobId then return end
+      Env.__WayfinderLoaderServer = game.JobId
+      Env.__WayfinderHopResume = game:GetService("HttpService"):JSONDecode(%q)
+      local OK = pcall(function() loadstring(game:HttpGet(%q))() end)
+      if not OK then Env.__WayfinderLoaderServer = nil end
+    ]], HTTP:JSONEncode({enabled = true, targets = SelectedVehicles, visited = VisitedServers}), WAYFINDER_RAW_URL)
+    if not pcall(Queue, Loader) then return false end
+    Session.__WayfinderQueuedServer = game.JobId
+  end
 
   local Failed = false
   local FailureConnection = TeleportService.TeleportInitFailed:Connect(function(FailedPlayer, _, _, FailedPlaceId, Options)
@@ -1627,7 +1639,7 @@ StartAutoHop = function()
         pcall(function()
           Window:Notify({
             title = "No Snipes",
-            content = "Server hopping in 5 seconds",
+            content = "No snipes: Server hopping in 5 seconds",
             icon = 110786993356448,
             duration = 5
           })
