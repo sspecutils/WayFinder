@@ -206,7 +206,7 @@ task.spawn(function()
 end)
 AutoHopToggle = AutoFarmTab:CreateToggle({
   name = "Auto Serverhop until snipe",
-  description = "Requires an auto-load configuration in Settings. Save Current As Auto Load before enabling.",
+  description = "Requires an auto-load configuration in Configs. Use Save Current As Auto Load before enabling.",
   flag = "AutoServerhopUntilSnipe", value = AutoHopEnabled,
   callback = function(Value)
     if Value == true and not HasAutoLoadConfig() then
@@ -214,7 +214,7 @@ AutoHopToggle = AutoFarmTab:CreateToggle({
       task.defer(function()
         if AutoHopToggle then AutoHopToggle:Set(false, true) end
       end)
-      Window:Notify({title = "Auto-load config required", content = "Go to Settings and use Save Current As Auto Load before serverhopping.", duration = 5})
+      Window:Notify({title = "Auto-load config required", content = "Go to Configs and use Save Current As Auto Load before serverhopping.", duration = 5})
       return
     end
     AutoHopEnabled = Value == true
@@ -1797,9 +1797,7 @@ if enabled and not running then
     running = false
   end)
 end
-local SettingsTab = Window:CreateTab({name = "Settings", icon = 80758916183665})
-SettingsTab:CreateSection({name = "Configurations", icon = 126116963775616})
-
+local ConfigsTab = Window:CreateTab({name = "Configs", icon = 80758916183665})
 local SelectedConfig
 
 local function WriteAutoLoad(Name)
@@ -1813,8 +1811,13 @@ local function WriteAutoLoad(Name)
   end)
 end
 
-local AutoLoadStatus = SettingsTab:CreateText({
-  name = "Current Auto-Load Config",
+local function ConfigNotice(Title, Content)
+  Window:Notify({title = Title, content = Content, duration = 4})
+end
+
+ConfigsTab:CreateSection({name = "Startup Configuration", icon = 138133190015277})
+local AutoLoadStatus = ConfigsTab:CreateText({
+  name = "Currently Auto-Loading",
   text = not FileAccess and "Unavailable (file access required)"
     or AutoLoadName or "None selected",
   icon = 121808839832144
@@ -1824,17 +1827,14 @@ local function UpdateAutoLoadStatus()
     or AutoLoadName or "None selected")
 end
 
-local ConfigList = SettingsTab:CreateDropdown({
+ConfigsTab:CreateSection({name = "Browse & Load", icon = 76018996254888})
+local ConfigList = ConfigsTab:CreateDropdown({
   name = "Saved Configurations", options = Window:ListConfigs(),
-  placeholder = "Choose a config", forgetState = true,
+  placeholder = "Select a saved config", forgetState = true,
   callback = function(Value)
     if typeof(Value) == "table" then Value = Value[1] end
     SelectedConfig = Value
   end
-})
-local ConfigName = SettingsTab:CreateInput({
-  name = "Configuration Name", placeholder = "New config name",
-  clearOnFocus = false, forgetState = true
 })
 local function RefreshConfigList(Name)
   local Names = Window:ListConfigs()
@@ -1843,89 +1843,118 @@ local function RefreshConfigList(Name)
   if SelectedConfig then ConfigList:Set(SelectedConfig, true) end
   UpdateAutoLoadStatus()
 end
-local function ConfigNotice(Title, Content)
-  Window:Notify({title = Title, content = Content, duration = 4})
-end
-SettingsTab:CreateButton({name = "Save Config", icon = 126116963775616, callback = function()
-  local Name = ConfigName.value
-  if typeof(Name) ~= "string" or Name:match("^%s*$") then Name = SelectedConfig end
-  if not Name or Name == "" then
-    ConfigNotice("Config", "Enter or select a configuration name")
-  elseif Window:Save(Name) then
-    RefreshConfigList(Name)
-    ConfigNotice("Config saved", Name)
-  else
-    ConfigNotice("Save failed", "Check executor file access")
-  end
-end})
-SettingsTab:CreateButton({name = "Load Config", icon = 76018996254888, callback = function()
-  if not SelectedConfig then return ConfigNotice("Config", "Select a saved configuration") end
-  if Window:Load(SelectedConfig) then
-    ConfigNotice("Config loaded", SelectedConfig)
-  else
-    ConfigNotice("Load failed", SelectedConfig)
-  end
-end})
-SettingsTab:CreateButton({name = "Save Current As Auto Load", icon = 138133190015277, callback = function()
-  local Name = SelectedConfig or "WayFinder Auto"
-  if not FileAccess then return ConfigNotice("Save failed", "Executor file access required") end
-  if not Window:Save(Name) then return ConfigNotice("Save failed", "Unable to save configuration") end
-  if not WriteAutoLoad(Name) then return ConfigNotice("Auto load failed", "Unable to save startup preference") end
-  AutoLoadName = Name
-  RefreshConfigList(Name)
-  ConfigNotice("Auto load updated", Name)
-end})
-SettingsTab:CreateButton({name = "Delete Config", icon = 87085435778560, description = "Permanently delete the selected saved configuration.", callback = function()
-  local Name = SelectedConfig
-  if not Name or not table.find(Window:ListConfigs(), Name) then
-    return ConfigNotice("Config", "Select a saved configuration to delete")
-  end
-  Window:Popup({
-    title = "Delete configuration?",
-    content = 'Permanently delete "' .. Name .. '"? This cannot be undone.',
-    icon = 87085435778560,
-    options = {
-      {text = "Cancel"},
-      {text = "Delete", style = "danger", callback = function()
-        local AutoConfig = AutoLoadName == Name
-        if AutoConfig and not WriteAutoLoad(nil) then
-          return ConfigNotice("Delete failed", "Unable to clear auto-load preference")
-        end
-        local OK, Deleted = pcall(function() return Window:DeleteConfig(Name) end)
-        if not OK or not Deleted then
-          if AutoConfig then WriteAutoLoad(Name) end
-          return ConfigNotice("Delete failed", "Unable to delete " .. Name)
-        end
-        if AutoConfig then
-          AutoLoadName = nil
-          if AutoHopEnabled then
-            AutoHopEnabled = false
-            if AutoHopToggle then AutoHopToggle:Set(false, true) end
-          end
-        end
-        SelectedConfig = nil
-        RefreshConfigList()
-        ConfigNotice("Config deleted", Name)
-      end}
-    }
-  })
-end})
-SettingsTab:CreateButton({name = "Clear Auto Load", icon = 87085435778560, callback = function()
-  if WriteAutoLoad(nil) then
-    AutoLoadName = nil
-    if AutoHopEnabled then
-      AutoHopEnabled = false
-      if AutoHopToggle then AutoHopToggle:Set(false, true) end
+ConfigsTab:CreateButton({
+  name = "Load Selected Config", icon = 76018996254888,
+  description = "Apply the settings from the configuration selected above.",
+  callback = function()
+    if not SelectedConfig then return ConfigNotice("Config", "Select a saved configuration") end
+    if Window:Load(SelectedConfig) then
+      ConfigNotice("Config loaded", SelectedConfig)
+    else
+      ConfigNotice("Load failed", SelectedConfig)
     end
-    UpdateAutoLoadStatus()
-    ConfigNotice("Auto load cleared", "No config will auto-load")
-  else
-    ConfigNotice("Auto load failed", "Executor file access required")
   end
-end})
-SettingsTab:CreateButton({name = "Refresh Config List", icon = 117913330389477, callback = function()
-  RefreshConfigList()
-end})
+})
+ConfigsTab:CreateButton({
+  name = "Refresh Saved Configs", icon = 117913330389477,
+  description = "Update the list of saved configurations.",
+  callback = function() RefreshConfigList() end
+})
+
+ConfigsTab:CreateSection({name = "Save Settings", icon = 126116963775616})
+local ConfigName = ConfigsTab:CreateInput({
+  name = "New Config Name", placeholder = "Enter a name (or use selected config)",
+  clearOnFocus = false, forgetState = true
+})
+ConfigsTab:CreateButton({
+  name = "Save Current Settings", icon = 126116963775616,
+  description = "Save your current toggles and vehicle selection. Enter a name above, or overwrite the selected config.",
+  callback = function()
+    local Name = ConfigName.value
+    if typeof(Name) ~= "string" or Name:match("^%s*$") then Name = SelectedConfig end
+    if not Name or Name == "" then
+      ConfigNotice("Config", "Enter or select a configuration name")
+    elseif Window:Save(Name) then
+      RefreshConfigList(Name)
+      ConfigNotice("Config saved", Name)
+    else
+      ConfigNotice("Save failed", "Check executor file access")
+    end
+  end
+})
+
+ConfigsTab:CreateSection({name = "Auto-Load Controls", icon = 138133190015277})
+ConfigsTab:CreateButton({
+  name = "Save Current As Auto Load", icon = 138133190015277,
+  description = "Overwrite the selected config with your current settings, then load it automatically on startup.",
+  callback = function()
+    local Name = SelectedConfig or "WayFinder Auto"
+    if not FileAccess then return ConfigNotice("Save failed", "Executor file access required") end
+    if not Window:Save(Name) then return ConfigNotice("Save failed", "Unable to save configuration") end
+    if not WriteAutoLoad(Name) then return ConfigNotice("Auto load failed", "Unable to save startup preference") end
+    AutoLoadName = Name
+    RefreshConfigList(Name)
+    ConfigNotice("Auto load updated", Name)
+  end
+})
+ConfigsTab:CreateButton({
+  name = "Clear Auto Load", icon = 87085435778560,
+  description = "Stop automatically loading a configuration at startup without deleting it.",
+  callback = function()
+    if WriteAutoLoad(nil) then
+      AutoLoadName = nil
+      if AutoHopEnabled then
+        AutoHopEnabled = false
+        if AutoHopToggle then AutoHopToggle:Set(false, true) end
+      end
+      UpdateAutoLoadStatus()
+      ConfigNotice("Auto load cleared", "No config will auto-load")
+    else
+      ConfigNotice("Auto load failed", "Executor file access required")
+    end
+  end
+})
+
+ConfigsTab:CreateSection({name = "Delete Saved Config", icon = 87085435778560})
+ConfigsTab:CreateButton({
+  name = "Delete Selected Config", icon = 87085435778560,
+  description = "Permanently delete the selected configuration. You will be asked to confirm.",
+  callback = function()
+    local Name = SelectedConfig
+    if not Name or not table.find(Window:ListConfigs(), Name) then
+      return ConfigNotice("Config", "Select a saved configuration to delete")
+    end
+    Window:Popup({
+      title = "Delete configuration?",
+      content = 'Permanently delete "' .. Name .. '"? This cannot be undone.',
+      icon = 87085435778560,
+      options = {
+        {text = "Cancel"},
+        {text = "Delete", style = "danger", callback = function()
+          local AutoConfig = AutoLoadName == Name
+          if AutoConfig and not WriteAutoLoad(nil) then
+            return ConfigNotice("Delete failed", "Unable to clear auto-load preference")
+          end
+          local OK, Deleted = pcall(function() return Window:DeleteConfig(Name) end)
+          if not OK or not Deleted then
+            if AutoConfig then WriteAutoLoad(Name) end
+            return ConfigNotice("Delete failed", "Unable to delete " .. Name)
+          end
+          if AutoConfig then
+            AutoLoadName = nil
+            if AutoHopEnabled then
+              AutoHopEnabled = false
+              if AutoHopToggle then AutoHopToggle:Set(false, true) end
+            end
+          end
+          SelectedConfig = nil
+          RefreshConfigList()
+          ConfigNotice("Config deleted", Name)
+        end}
+      }
+    })
+  end
+})
 RefreshConfigList()
 
 if Resume and Resume.enabled and HasAutoLoadConfig() then
