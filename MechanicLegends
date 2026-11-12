@@ -86,7 +86,7 @@ local function HasAutoLoadConfig()
   local OK, Names = pcall(function() return Window:ListConfigs() end)
   return OK and typeof(Names) == "table" and table.find(Names, AutoLoadName) ~= nil
 end
-local Session = (getgenv and getgenv()) or _G
+local Session = StartupSession
 local Resume = Session.__WayfinderHopResume
 Session.__WayfinderHopResume = nil
 local JunkyardEnabled = Resume ~= nil and Resume.enabled == true
@@ -214,8 +214,6 @@ task.spawn(function()
       return 100 * Entry.weight / TotalWeight
     end
     if Entry.chance then
-      -- Explicit per-entry Chance may be a fraction (0..1) or a percentage (0..100).
-      -- If the spawn table mixes formats, weights take precedence.
       return Entry.chance <= 1 and Entry.chance * 100 or Entry.chance
     end
     return nil
@@ -698,65 +696,65 @@ local function RepairStage(State, Part, Kind)
 end
 local function CleanEngine(Ctx)
   local List, State = Ctx.state.repairList, Ctx.state
-
   if #List == 0 then return true end
 
-  local RustQueue, PolishQueue = {}, {}
+  local Jobs, Remaining, RustCount, PolishCount = {}, 0, 0, 0
   for _, Part in ipairs(List) do
-    if (NumberAttr(Part, "Rust") or math.huge) > 0 then
-      table.insert(RustQueue, Part)
-    else
-      table.insert(PolishQueue, Part)
+    local Rust = (NumberAttr(Part, "Rust") or math.huge) > 0
+    local Polish = (NumberAttr(Part, "Damage") or -math.huge) < 100
+    Jobs[#Jobs + 1] = {part = Part, rust = Rust, polish = Polish, busy = false}
+    if Rust then
+      RustCount += 1
+      Remaining += 1
+    end
+    if Polish then
+      PolishCount += 1
+      Remaining += 1
     end
   end
-  local NextRust, NextPolish = 1, 1
-  local RustDone, PolishDone, Failed = 0, 0, {}
-  local RustWorkers = math.min(CFG.MaxRust, #RustQueue)
-  local PolishWorkers = math.min(CFG.MaxPolish, #List)
 
-  for _ = 1, RustWorkers do
-    task.spawn(function()
-      local OK, Error = pcall(function()
-        while true do
-          local Index = NextRust
-          NextRust += 1
-          local Part = RustQueue[Index]
-          if not Part then break end
-          if RepairStage(State, Part, "Rust") then
-            table.insert(PolishQueue, Part)
-          else
-            Failed[Part.Name] = "Rust incomplete"
-          end
+  local Failed, Finished, Aborted = {}, 0, false
+  local function Work(Stage)
+    while Remaining > 0 and not Aborted do
+      local Job
+      for _, Entry in ipairs(Jobs) do
+        if Entry[Stage] and not Entry.busy then
+          Entry[Stage] = false
+          Entry.busy = true
+          Remaining -= 1
+          Job = Entry
+          break
         end
-      end)
-      if not OK then Failed.System = tostring(Error) end
-      RustDone += 1
-    end)
-  end
-  for _ = 1, PolishWorkers do
-    task.spawn(function()
-      local OK, Error = pcall(function()
-        while true do
-          local Part = PolishQueue[NextPolish]
-          if Part then
-            NextPolish += 1
-            if not RepairStage(State, Part, "Wear") then
-              Failed[Part.Name] = "Polishing incomplete"
-            end
-          elseif RustDone >= RustWorkers then
-            break
-          else
-            task.wait(0.1)
-          end
+      end
+      if Job then
+        local Kind = Stage == "rust" and "Rust" or "Wear"
+        if not RepairStage(State, Job.part, Kind) then
+          Failed[Job.part.Name] = Stage == "rust" and "Rust incomplete" or "Polishing incomplete"
         end
+        Job.busy = false
+      else
+        task.wait(0.08)
+      end
+    end
+  end
+
+  local RustWorkers = math.min(CFG.MaxRust, RustCount)
+  local PolishWorkers = math.min(CFG.MaxPolish, PolishCount)
+  local WorkerCount = RustWorkers + PolishWorkers
+  for _, Group in ipairs({{"rust", RustWorkers}, {"polish", PolishWorkers}}) do
+    local Stage = Group[1]
+    for _ = 1, Group[2] do
+      task.spawn(function()
+        local OK, Error = pcall(Work, Stage)
+        if not OK then
+          Failed.System = tostring(Error)
+          Aborted = true
+        end
+        Finished += 1
       end)
-      if not OK then Failed.System = tostring(Error) end
-      PolishDone += 1
-    end)
+    end
   end
-  while RustDone < RustWorkers or PolishDone < PolishWorkers do
-    task.wait(0.1)
-  end
+  while Finished < WorkerCount do task.wait(0.1) end
   for _, Part in ipairs(List) do
     if not IsComplete(Part) then
       Failed[Part.Name] = Failed[Part.Name] or "Condition below 100/0"
@@ -1441,12 +1439,6 @@ MainTab:CreateButton({name = "Reassemble Engine", callback = function()
   if ReassembleOwnedCar then task.spawn(ReassembleOwnedCar) end
 end})
 
-local function GetVehicleName(Entry, Metadata)
-  local Id = Entry:GetAttribute("ItemID") or (Metadata and Metadata:GetAttribute("ItemID"))
-    or Entry:GetAttribute("ItemId") or (Metadata and Metadata:GetAttribute("ItemId"))
-    or Entry:GetAttribute("DirId") or (Metadata and Metadata:GetAttribute("DirId"))
-  return Id and tostring(Id) ~= "" and tostring(Id) or ("Vehicle " .. Entry.Name)
-end
 local function GetOwnedVehicles()
   local Folder = Reflect:FindFirstChild("Inventory")
   local Entries = {}
@@ -1461,7 +1453,7 @@ local function GetOwnedVehicles()
           or Entry:GetAttribute("DirId") or (Metadata and Metadata:GetAttribute("DirId"))
         table.insert(Entries, {
           uuid = Uuid, id = Id, entry = Entry,
-          name = GetVehicleName(Entry, Metadata)
+          name = Id and tostring(Id) ~= "" and tostring(Id) or ("Vehicle " .. Entry.Name)
         })
       end
     end
@@ -1482,10 +1474,8 @@ local function OwnedCarColorName(Entry)
   local function Channel(Key)
     local Value = Color:GetAttribute(Key)
     if typeof(Value) == "string" then
-      -- Paint attributes store two-digit hexadecimal channel text (e.g. "20", "A8").
       return tonumber(Value, 16)
     elseif typeof(Value) == "number" then
-      -- Attribute values may be numeric in the 0..255 range.
       return Value
     end
     return nil
@@ -1527,8 +1517,6 @@ local function RefreshOwnedCars()
   for _, Item in ipairs(Items) do
     local Base = Item.name .. " (" .. OwnedCarColorName(Item.entry) .. ")"
     local Label = Base
-    -- If two vehicles have the same ItemID and colour, use a short UUID
-    -- fragment only to make the dropdown's selection keys unique.
     if UsedLabels[Label] then
       local Tail = Item.uuid:sub(1, 4)
       Label = Base .. " " .. Tail
@@ -1548,6 +1536,7 @@ local function RefreshOwnedCars()
   if SelectedLabel then OwnedCarDropdown:Set(SelectedLabel) end
 end
 
+do
 CarModsTab:CreateSection({name = "Performance", icon = 90307460742494})
 local CarModsDefaults = {Power = 5000, Speed = 400, Grip = 1.9, Braking = 12000, Handling = 60}
 local CarModsValues = table.clone(CarModsDefaults)
@@ -1626,9 +1615,6 @@ CarModsTab:CreateButton({name = "Apply Car Mods", icon = 98218034436456, callbac
       TorqueAtRedline = Power * 0.85,
       TopSpeedMPH = CarModsValues.Speed,
       TopSpeedWindowMPH = 8,
-      -- TopSpeedMPH only removes the governor; gearing must also support the target.
-      -- Smaller final-drive multipliers lengthen the gears for higher wheel speed.
-      -- This is an approximate speed-based gearing map, not a guaranteed MPH result.
       FinalDriveMultiplier = math.clamp(220 / CarModsValues.Speed, 0.25, 1.5),
       AeroDrag = 0,
       FootBrakeForce = CarModsValues.Braking,
@@ -1692,7 +1678,6 @@ CarModsTab:CreateButton({name = "Restore To Default", icon = 87085435778560, cal
       Car:SetAttribute("TIRE_R_" .. Key, nil)
     end
     for _, Key in ipairs(CarModsTireShared) do Car:SetAttribute("TIRE_" .. Key, nil) end
-    -- Returning to the car's initial ABS/TCS settings is handled by the chassis on reinitialization.
   end)
   CarModsBusy = false
   if OK then
@@ -1703,13 +1688,13 @@ CarModsTab:CreateButton({name = "Restore To Default", icon = 87085435778560, cal
   end
 end})
 
+end
 
--- Infinite Yield-style gravity control. Workspace.Gravity is the shared physics setting
--- as seen by this client; the server may not retain or replicate the adjustment.
 CarModsTab:CreateSection({name = "Vehicle Utilities", icon = 112148279212860})
+do
 local DefaultGravity = 196.2
 local GravitySlider
-local GravityScale = 100 -- 0.0-10.0 on the slider maps to 0-1000 actual gravity
+local GravityScale = 100
 local UpdatingGravity = false
 
 local function GravityToSlider(Gravity)
@@ -1741,21 +1726,101 @@ CarModsTab:CreateButton({
   end
 })
 
+end
 
-CarModsTab:CreateText({name = "Infinite Fuel", text = "Coming soon."})
-CarModsTab:CreateText({name = "No Engine Overheating", text = "Coming soon."})
-CarModsTab:CreateText({name = "No Engine Damage", text = "Coming soon."})
+do
+local InfiniteFuelEnabled = false
+local FuelCar, FuelConnection
+
+local function GetFuelCar()
+  local Character = Player.Character
+  local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+  local Seat = Humanoid and Humanoid.SeatPart
+  if not Seat then return nil end
+
+  local Car = Seat
+  while Car and Car.Parent ~= Cars do Car = Car.Parent end
+  return Car
+end
+
+local function BindFuelCar(Car)
+  if FuelCar == Car then return end
+  if FuelConnection then FuelConnection:Disconnect() FuelConnection = nil end
+  FuelCar = Car
+  if not Car then return end
+
+  local Correcting = false
+  local function KeepFull()
+    if not InfiniteFuelEnabled or FuelCar ~= Car or Correcting then return end
+    if Car:GetAttribute("Fuel") ~= 1 then
+      Correcting = true
+      Car:SetAttribute("Fuel", 1)
+      Correcting = false
+    end
+  end
+
+  FuelConnection = Car:GetAttributeChangedSignal("Fuel"):Connect(KeepFull)
+  KeepFull()
+end
+
+CarModsTab:CreateToggle({
+  name = "Infinite Fuel", flag = "WayfinderInfiniteFuel", value = false,
+  callback = function(On)
+    InfiniteFuelEnabled = On == true
+    if InfiniteFuelEnabled then
+      BindFuelCar(GetFuelCar())
+    else
+      BindFuelCar(nil)
+    end
+  end
+})
+
+task.spawn(function()
+  while true do
+    task.wait(0.25)
+    if InfiniteFuelEnabled then
+      BindFuelCar(GetFuelCar())
+    end
+  end
+end)
+end
+
+do
+local DamageNetwork = require(RS.Shared.Network)
+local DamageFire = DamageNetwork.Fire
+local DamageRemotes = DamageNetwork.Remotes
+
+local function BlockEngineDamage(Remote, ...)
+  if Remote == DamageRemotes.ApplyOverheatDamage
+    or Remote == DamageRemotes.ApplyBoostDamage
+    or Remote == DamageRemotes.ApplyOverRevDamage then return end
+  return DamageFire(Remote, ...)
+end
+
+CarModsTab:CreateToggle({
+  name = "No Engine Damage", flag = "WayfinderNoEngineDamage", value = false,
+  callback = function(On)
+    if On then
+      DamageNetwork.Fire = BlockEngineDamage
+    elseif DamageNetwork.Fire == BlockEngineDamage then
+      DamageNetwork.Fire = DamageFire
+    end
+  end
+})
+
+end
 
 local ManualBusy = false
-local function ManualMessage(_) end
+do
 local function FindSpawnedCar(Uuid, CarId, Before)
-  for _, Car in ipairs(Cars:GetChildren()) do
+  local Spawned = Cars:GetChildren()
+  for _, Car in ipairs(Spawned) do
     if Car:GetAttribute("ItemUUID") == Uuid or Car:GetAttribute("UUID") == Uuid
       or Car:GetAttribute("Uuid") == Uuid or Car:GetAttribute("InventoryUUID") == Uuid then
       return Car
     end
   end
-  for _, Car in ipairs(Cars:GetChildren()) do
+  for _, Car in ipairs(Spawned) do
     if not Before[Car] and (not CarId or Car.Name == CarId) then return Car end
   end
 end
@@ -1830,7 +1895,6 @@ RepairOwnedCar = function()
   end
   ManualBusy = true
   local OK, Error = pcall(function()
-    ManualMessage("Spawning selected vehicle...")
     local Before = {}
     for _, Car in ipairs(Cars:GetChildren()) do Before[Car] = true end
     local Spawn = F:WaitForChild("RequestSpawnVehicle")
@@ -1863,7 +1927,6 @@ RepairOwnedCar = function()
     }
     local Ctx = {car = Car, engine = Engine, sequence = Sequence,
       state = State, tasks = {required = {}, targets = Expected}}
-    ManualMessage("Removing engine components...")
     Disassemble(Ctx)
     BuildPlan(Ctx)
     State.required.Intercooler = nil
@@ -1876,11 +1939,9 @@ RepairOwnedCar = function()
     for Name, Reason in pairs(State.problems) do
       error(Name .. ": " .. Reason)
     end
-    ManualMessage("Cleaning damaged engine components...")
     if not CleanEngine(Ctx) then error("Engine cleaning incomplete") end
     local Missing = Shortages(Ctx)
     if next(Missing) then
-      ManualMessage("Ordering missing stock components...")
       local Payload = {}
       for Name, Count in pairs(Missing) do
         if Name ~= "Intercooler" then
@@ -1907,7 +1968,6 @@ RepairOwnedCar = function()
         error("Stock order rejected (" .. tostring(CarId) .. ", " .. tostring(Prefix)
           .. "): " .. Reason .. ". Items: " .. table.concat(Items, ", "), 0)
       end
-      ManualMessage("Waiting for stock delivery...")
       local EndAt = os.clock() + CFG.DeliveryTimeout
       local Delivered = false
       while os.clock() < EndAt do
@@ -1922,14 +1982,12 @@ RepairOwnedCar = function()
         if Delivered then break end
         local Box = FindOrderBox(Purchase)
         if Box then
-          ManualMessage("Opening replacement delivery...")
           OpenBox(Box)
         end
         task.wait(0.5)
       end
       if not Delivered then error("Replacement delivery not confirmed; will not reorder automatically") end
     end
-    ManualMessage("Reassembling engine...")
     if not Assemble(Ctx) then error("Engine assembly incomplete") end
     local Trash = F:FindFirstChild("TrashbinDeposit")
     local Discarded, Failed = 0, 0
@@ -1972,7 +2030,6 @@ RepairOwnedCar = function()
   ManualBusy = false
 end
 
--- Manual engine actions intentionally do not clean, buy, or discard components.
 local ManualDetachedByCar = {}
 local function MaintenanceNotice(Title, Text)
   Window:Notify({title = Title, content = Text, duration = 6})
@@ -2001,8 +2058,6 @@ local function ResolveMaintenanceCar(Selected)
   local Uuid = Selected.uuid
   local Car = FindSpawnedCar(Uuid, Selected.id, {})
   if Car then
-    -- Existing parked vehicles may have no inventory UUID attribute; only
-    -- trust a positive UUID match before considering a respawn.
     local FoundUuid = Car:GetAttribute("ItemUUID") or Car:GetAttribute("UUID")
       or Car:GetAttribute("Uuid") or Car:GetAttribute("InventoryUUID")
     if FoundUuid ~= Uuid then Car = nil end
@@ -2095,7 +2150,6 @@ local function ManualEngineAction(Mode)
           end
         end
         if not Part then
-          -- Intercooler is optional; don't treat an absent loose one as an error.
           if Name == "Intercooler" and not Detached[Name] then
             Counts.skipped += 1
           else
@@ -2138,9 +2192,10 @@ end
 DisassembleOwnedCar = function() ManualEngineAction("Disassemble") end
 ReassembleOwnedCar = function() ManualEngineAction("Reassemble") end
 
--- Vehicle paint operations share the Main tab's Selected Car dropdown.
--- Paint requests are sent only when the user explicitly presses Apply Paint.
+end
+
 MainTab:CreateDivider({ text = "Painting" })
+do
 local SelectedPaintColor = Color3.fromRGB(226, 78, 16)
 local PaintActionBusy = false
 
@@ -2159,7 +2214,6 @@ local function FindSelectedOwnedCar()
 end
 
 local function ResolvePaintCar(Owned)
-  -- Do not guess based on the car's name; there may be several identical cars.
   for _, Car in ipairs(Cars:GetChildren()) do
     if Car:GetAttribute("ItemUUID") == Owned.uuid
       or Car:GetAttribute("UUID") == Owned.uuid
@@ -2169,7 +2223,6 @@ local function ResolvePaintCar(Owned)
     end
   end
 
-  -- If the selected owned vehicle is not currently spawned, request it normally.
   local Before = {}
   for _, Car in ipairs(Cars:GetChildren()) do Before[Car] = true end
   local Success, Response = pcall(function()
@@ -2191,8 +2244,6 @@ local function ResolvePaintCar(Owned)
         return Car
       end
     end
-    -- A newly spawned car can lack UUID attributes in this game's model.
-    -- In that case only accept a uniquely identified new model of the right type.
     local Candidate, Count = nil, 0
     for _, Car in ipairs(Cars:GetChildren()) do
       if not Before[Car] and (not Owned.id or Car.Name == Owned.id) then
@@ -2210,8 +2261,6 @@ local PaintLocations = {
   Paint = Vector3.new(396, 4, 4732)
 }
 
--- Vehicle-goto-style move: keep the driver seated and move the connected
--- physics assembly, rather than moving the avatar independently of the car.
 local function TeleportForPaint(Car, Destination)
   if not Car:IsA("Model") or not Car.Parent then
     error("Selected vehicle is not available to teleport.")
@@ -2221,8 +2270,6 @@ local function TeleportForPaint(Car, Destination)
   local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
   if not Humanoid then error("Your character must be spawned before painting.") end
 
-  -- The game seats the player automatically when spawning a car outside.
-  -- Wait for that seat instead of teleporting the character separately.
   local Seat
   local Deadline = os.clock() + 8
   repeat
@@ -2234,8 +2281,6 @@ local function TeleportForPaint(Car, Destination)
     error("You must be seated in the selected car to teleport it.")
   end
 
-  -- Use the occupied driver's seat as the transport reference. Preserve the
-  -- vehicle's orientation and move its connected parts by the same transform.
   local RootPart = Seat.AssemblyRootPart or Seat
   if RootPart.Anchored then
     error("The selected vehicle is anchored and cannot be vehicle-teleported.")
@@ -2243,8 +2288,6 @@ local function TeleportForPaint(Car, Destination)
   local Target = typeof(Destination) == "CFrame"
     and Destination or CFrame.new(Destination) * Car:GetPivot().Rotation
   local Delta = Target * Car:GetPivot():Inverse()
-  -- Apply the transform once per physics assembly to avoid repositioning
-  -- every welded part separately (which can break wheel/seat joints).
   local Assemblies = {}
   for _, Part in ipairs(Car:GetDescendants()) do
     if Part:IsA("BasePart") and not Part.Anchored then
@@ -2265,8 +2308,6 @@ local function TeleportForPaint(Car, Destination)
   end
 end
 
--- The player's owned-vehicle entry contains the server-updated primary paint RGB.
--- Read it directly instead of relying on client-only body-part appearances.
 local function ReadOwnedPrimaryPaint(Owned)
   local Meta = Owned.entry and Owned.entry:FindFirstChild("Metadata")
   local Slots = Meta and Meta:FindFirstChild("PaintSlots")
@@ -2297,7 +2338,6 @@ local function WaitForPaintUpdate(Owned, TargetColor, Previous, Timeout)
   repeat
     local Current = ReadOwnedPrimaryPaint(Owned)
     if PaintMatches(Current, TargetColor) then return true end
-    -- Colour replication can arrive slightly later than the remote response.
     task.wait(0.15)
   until os.clock() >= Deadline
   return false
@@ -2325,13 +2365,11 @@ local function RunPaintAction(Action)
       if Player:GetAttribute("InShopInterior") ~= false then
         error("Leave your workshop before using vehicle painting.")
       end
-      -- The game automatically seats the player when spawning outside.
       task.wait(1)
       if not Car.Parent then error("The selected vehicle despawned.") end
       OriginalPivot = Car:GetPivot()
       TeleportForPaint(Car, PaintLocations[Action])
       Moved = true
-      -- Allow the occupied car to settle at the service location.
       task.wait(1)
       if not Car.Parent then error("The selected vehicle despawned.") end
 
@@ -2368,8 +2406,6 @@ local function RunPaintAction(Action)
       end
     end)
 
-    -- Restore the car's actual pre-teleport pivot, not its spawn point.
-    -- Also recover from errors/timeouts where the car is still available.
     if Moved and Car and Car.Parent and OriginalPivot then
       local BackOK, BackError = pcall(function()
         TeleportForPaint(Car, OriginalPivot)
@@ -2403,6 +2439,8 @@ MainTab:CreateButton({
   callback = function() RunPaintAction("Paint") end
 })
 
+end
+
 RefreshOwnedCars()
 task.spawn(function()
   local Folder = Reflect:WaitForChild("Inventory", 20)
@@ -2412,6 +2450,7 @@ task.spawn(function()
   Folder.ChildRemoved:Connect(function() task.defer(RefreshOwnedCars) end)
 end)
 
+do
 local Cash = Player:WaitForChild("leaderstats"):WaitForChild("Cash")
 local function GetJunkyardCars()
   local Root = workspace:FindFirstChild("__JUNKYARD")
@@ -2598,7 +2637,6 @@ local function QueueNextServer()
     or (fluxus and fluxus.queue_on_teleport)
   if typeof(Queue) ~= "function" then return false end
   if WAYFINDER_RAW_URL == "YOUR_WAYFINDER_RAW_URL" then return false end
-  local HTTP = game:GetService("HttpService")
   local TeleportService = game:GetService("TeleportService")
   local URL = "https://games.roblox.com/v1/games/" .. game.PlaceId
     .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
@@ -2766,6 +2804,9 @@ elseif JunkyardEnabled then
   task.defer(StartJunkyard)
 end
 
+end
+
+do
 local MiscTab = Window:CreateTab({name = "Misc", icon = 113618379616952})
 MiscTab:CreateSection({ name = "Server", icon = 92188766517878 })
 MiscTab:CreateText({
@@ -2965,7 +3006,6 @@ end})
 RefreshConfigList()
 
 local function ArrangeConfigButtonsRow()
-  local Players = game:GetService("Players")
   local function FindElementRoot(Texts)
     local SearchRoots = {game:GetService("CoreGui"), Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")}
     for _, Root in ipairs(SearchRoots) do
@@ -3040,4 +3080,5 @@ elseif AutoLoadName then
       ConfigNotice("Auto load failed", "Cannot load: " .. AutoLoadName)
     end
   end)
+end
 end
