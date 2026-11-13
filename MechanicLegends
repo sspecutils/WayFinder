@@ -89,6 +89,9 @@ end
 local Session = StartupSession
 local Resume = Session.__WayfinderHopResume
 Session.__WayfinderHopResume = nil
+if Resume and Resume.autoExecute ~= nil then
+  Session.__WayfinderAutoExecute = Resume.autoExecute == true
+end
 local JunkyardEnabled = Resume ~= nil and Resume.enabled == true
 local AutoHopEnabled = JunkyardEnabled
 if AutoHopEnabled and not HasAutoLoadConfig() then AutoHopEnabled = false end
@@ -2668,7 +2671,7 @@ local function QueueNextServer()
       Env.__WayfinderHopResume = game:GetService("HttpService"):JSONDecode(%q)
       local OK = pcall(function() loadstring(game:HttpGet(%q))() end)
       if not OK then Env.__WayfinderLoaderServer = nil end
-    ]], HTTP:JSONEncode({enabled = true, targets = SelectedVehicles, visited = VisitedServers}), WAYFINDER_RAW_URL)
+    ]], HTTP:JSONEncode({enabled = true, targets = SelectedVehicles, visited = VisitedServers, autoExecute = Session.__WayfinderAutoExecute == true}), WAYFINDER_RAW_URL)
     if not pcall(Queue, Loader) then return false end
     Session.__WayfinderQueuedServer = game.JobId
   end
@@ -2809,6 +2812,31 @@ end
 do
 local MiscTab = Window:CreateTab({name = "Misc", icon = 113618379616952})
 MiscTab:CreateSection({ name = "Server", icon = 92188766517878 })
+local function QueueManualAutoExecute()
+  if Session.__WayfinderAutoExecute ~= true then return true end
+  local Queue = queue_on_teleport or queueonteleport
+    or (syn and syn.queue_on_teleport)
+    or (fluxus and fluxus.queue_on_teleport)
+  if typeof(Queue) ~= "function" then
+    Window:Notify({title = "Auto Execute unavailable", content = "Your executor does not support queue_on_teleport.", duration = 5})
+    return false
+  end
+  local Loader = string.format([[
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    local Env = (getgenv and getgenv()) or _G
+    if Env.__WayfinderLoaderServer == game.JobId
+      or Env.__WayfinderActiveServer == game.JobId then return end
+    Env.__WayfinderLoaderServer = game.JobId
+    Env.__WayfinderAutoExecute = true
+    local OK = pcall(function() loadstring(game:HttpGet(%q))() end)
+    if not OK then Env.__WayfinderLoaderServer = nil end
+  ]], WAYFINDER_RAW_URL)
+  if not pcall(Queue, Loader) then
+    Window:Notify({title = "Auto Execute failed", content = "Could not queue Wayfinder for the next server.", duration = 5})
+    return false
+  end
+  return true
+end
 MiscTab:CreateText({
     name = "Anti-Afk",
     text = "Enabled by default.",
@@ -2819,12 +2847,17 @@ MiscTab:CreateButton({
   icon = 84183336178654,
   callback = function()
     task.spawn(function()
+      if not QueueManualAutoExecute() then return end
       local TeleportService = game:GetService("TeleportService")
 
       if #Players:GetPlayers() <= 1 then
-        Player:Kick("\nRejoining...")
-        task.wait(0.3)
-        TeleportService:Teleport(game.PlaceId, Player)
+        if Session.__WayfinderAutoExecute == true then
+          TeleportService:Teleport(game.PlaceId, Player)
+        else
+          Player:Kick("\nRejoining...")
+          task.wait(0.3)
+          TeleportService:Teleport(game.PlaceId, Player)
+        end
       else
         TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, Player)
       end
@@ -2858,10 +2891,18 @@ MiscTab:CreateButton({
       if #Available == 0 then return end
 
       local Target = Available[math.random(#Available)]
+      if not QueueManualAutoExecute() then return end
       pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, Target, Player)
       end)
     end)
+  end
+})
+MiscTab:CreateToggle({
+  name = "Auto Execute", flag = "AutoExecute",
+  value = Session.__WayfinderAutoExecute == true,
+  callback = function(Value)
+    Session.__WayfinderAutoExecute = Value == true
   end
 })
 if enabled and not running then
