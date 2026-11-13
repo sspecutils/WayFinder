@@ -1663,7 +1663,7 @@ CarModsTab:CreateButton({name = "Apply Car Mods", icon = 98218034436456, callbac
     CarModsNotify("Car mods failed", tostring(Err))
   end
 end})
-CarModsTab:CreateButton({name = "Restore To Default", icon = 87085435778560, description = "Exit and Re-Enter vehicle to fully apply car mods." callback = function()
+CarModsTab:CreateButton({name = "Restore To Default", icon = 87085435778560, description = "Exit and Re-Enter vehicle to fully apply car mods.", callback = function()
   if CarModsBusy then return end
   local Car = GetCarModsCar()
   if not Car then return end
