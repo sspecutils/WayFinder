@@ -696,65 +696,65 @@ local function RepairStage(State, Part, Kind)
 end
 local function CleanEngine(Ctx)
   local List, State = Ctx.state.repairList, Ctx.state
+
   if #List == 0 then return true end
 
-  local Jobs, Remaining, RustCount, PolishCount = {}, 0, 0, 0
+  local RustQueue, PolishQueue = {}, {}
   for _, Part in ipairs(List) do
-    local Rust = (NumberAttr(Part, "Rust") or math.huge) > 0
-    local Polish = (NumberAttr(Part, "Damage") or -math.huge) < 100
-    Jobs[#Jobs + 1] = {part = Part, rust = Rust, polish = Polish, busy = false}
-    if Rust then
-      RustCount += 1
-      Remaining += 1
-    end
-    if Polish then
-      PolishCount += 1
-      Remaining += 1
+    if (NumberAttr(Part, "Rust") or math.huge) > 0 then
+      table.insert(RustQueue, Part)
+    else
+      table.insert(PolishQueue, Part)
     end
   end
+  local NextRust, NextPolish = 1, 1
+  local RustDone, PolishDone, Failed = 0, 0, {}
+  local RustWorkers = math.min(CFG.MaxRust, #RustQueue)
+  local PolishWorkers = math.min(CFG.MaxPolish, #List)
 
-  local Failed, Finished, Aborted = {}, 0, false
-  local function Work(Stage)
-    while Remaining > 0 and not Aborted do
-      local Job
-      for _, Entry in ipairs(Jobs) do
-        if Entry[Stage] and not Entry.busy then
-          Entry[Stage] = false
-          Entry.busy = true
-          Remaining -= 1
-          Job = Entry
-          break
+  for _ = 1, RustWorkers do
+    task.spawn(function()
+      local OK, Error = pcall(function()
+        while true do
+          local Index = NextRust
+          NextRust += 1
+          local Part = RustQueue[Index]
+          if not Part then break end
+          if RepairStage(State, Part, "Rust") then
+            table.insert(PolishQueue, Part)
+          else
+            Failed[Part.Name] = "Rust incomplete"
+          end
         end
-      end
-      if Job then
-        local Kind = Stage == "rust" and "Rust" or "Wear"
-        if not RepairStage(State, Job.part, Kind) then
-          Failed[Job.part.Name] = Stage == "rust" and "Rust incomplete" or "Polishing incomplete"
-        end
-        Job.busy = false
-      else
-        task.wait(0.08)
-      end
-    end
-  end
-
-  local RustWorkers = math.min(CFG.MaxRust, RustCount)
-  local PolishWorkers = math.min(CFG.MaxPolish, PolishCount)
-  local WorkerCount = RustWorkers + PolishWorkers
-  for _, Group in ipairs({{"rust", RustWorkers}, {"polish", PolishWorkers}}) do
-    local Stage = Group[1]
-    for _ = 1, Group[2] do
-      task.spawn(function()
-        local OK, Error = pcall(Work, Stage)
-        if not OK then
-          Failed.System = tostring(Error)
-          Aborted = true
-        end
-        Finished += 1
       end)
-    end
+      if not OK then Failed.System = tostring(Error) end
+      RustDone += 1
+    end)
   end
-  while Finished < WorkerCount do task.wait(0.1) end
+  for _ = 1, PolishWorkers do
+    task.spawn(function()
+      local OK, Error = pcall(function()
+        while true do
+          local Part = PolishQueue[NextPolish]
+          if Part then
+            NextPolish += 1
+            if not RepairStage(State, Part, "Wear") then
+              Failed[Part.Name] = "Polishing incomplete"
+            end
+          elseif RustDone >= RustWorkers then
+            break
+          else
+            task.wait(0.1)
+          end
+        end
+      end)
+      if not OK then Failed.System = tostring(Error) end
+      PolishDone += 1
+    end)
+  end
+  while RustDone < RustWorkers or PolishDone < PolishWorkers do
+    task.wait(0.1)
+  end
   for _, Part in ipairs(List) do
     if not IsComplete(Part) then
       Failed[Part.Name] = Failed[Part.Name] or "Condition below 100/0"
